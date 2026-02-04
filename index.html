@@ -1,0 +1,1879 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STS PRAKARYA DAN KEWIRAUSAHAAN TKJ</title>
+    
+    <script>
+        window.onerror = function(message, source, lineno, colno, error) {
+            if(message.includes("ResizeObserver")) return;
+            console.error(message, lineno);
+        };
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Firebase SDK (Modular) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, getDocs, doc, updateDoc, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- EXPOSE FIREBASE FUNCTIONS ---
+        window.getDocs = getDocs;
+        window.collection = collection;
+        window.addDoc = addDoc;
+        window.onSnapshot = onSnapshot;
+        window.query = query;
+        window.doc = doc;
+        window.updateDoc = updateDoc;
+        window.deleteDoc = deleteDoc;
+        window.setDoc = setDoc;
+
+        window.db = null;
+        window.auth = null;
+        window.appId = 'ukktkj'; 
+        window.isFirebaseReady = false;
+        window.currentExamToken = "TKJ2025"; 
+        window.currentExamDuration = 60; 
+        window.currentMinExamDuration = 0; 
+        window.allQuestionsDB = []; 
+        window.currentExamDocId = null; 
+        window.examStartTime = null; 
+
+        // --- DEVICE FINGERPRINTING ---
+        function getDeviceFingerprint() {
+            const nav = window.navigator;
+            const screen = window.screen;
+            const raw = `${nav.userAgent}||${screen.width}x${screen.height}||${screen.colorDepth}||${nav.hardwareConcurrency || 'u'}||${new Date().getTimezoneOffset()}`;
+            
+            let hash = 0;
+            for (let i = 0; i < raw.length; i++) {
+                const char = raw.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash; 
+            }
+            return "DEV-" + Math.abs(hash).toString(16);
+        }
+
+        async function initFirebase() {
+            // TIME LIMIT FOR CONNECTION
+            const connectionTimeout = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error("Koneksi Timeout")), 5000)
+            );
+
+            try {
+                let firebaseConfig;
+                const customConfig = {
+                    apiKey: "AIzaSyAdqApOvuUXrZUO19NfiqZCLSyUYR74w5M",
+                    authDomain: "waliq-ded98.firebaseapp.com",
+                    projectId: "waliq-ded98",
+                    storageBucket: "waliq-ded98.firebasestorage.app",
+                    messagingSenderId: "915222555864",
+                    appId: "1:915222555864:web:25320841c97661172e3bad",
+                    measurementId: "G-K51RW0YQ0M"
+                };
+
+                if (customConfig.apiKey && customConfig.apiKey !== "GANTI_DENGAN_API_KEY_ANDA") {
+                    firebaseConfig = customConfig;
+                } else if (typeof __firebase_config !== 'undefined') {
+                    firebaseConfig = JSON.parse(__firebase_config);
+                } else {
+                    throw new Error("Config Kosong");
+                }
+
+                if (typeof __app_id !== 'undefined') window.appId = __app_id;
+
+                const app = initializeApp(firebaseConfig);
+                window.auth = getAuth(app);
+                window.db = getFirestore(app);
+
+                // Race between connection and timeout
+                await Promise.race([
+                    (async () => {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(window.auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(window.auth);
+                        }
+                    })(),
+                    connectionTimeout
+                ]);
+                
+                window.isFirebaseReady = true;
+                console.log("Firebase Connected");
+                updateConnectionStatus(true, "Terhubung ke Server");
+                
+                listenForSettings(); 
+                listenForQuestions(); 
+                
+                if (window.currentUserRole === 'teacher') {
+                    setupRealtimeListener();
+                }
+
+            } catch (error) {
+                console.warn("Firebase Init Error/Timeout:", error);
+                window.isFirebaseReady = false;
+                // Tetap izinkan aplikasi berjalan dalam mode offline
+                updateConnectionStatus(false, "Mode Offline (Lokal)");
+            }
+        }
+        
+        function updateConnectionStatus(isOnline, text) {
+            const el = document.getElementById('connection-status');
+            if(el) {
+                el.innerText = text;
+                el.className = isOnline 
+                    ? "text-xs font-bold text-green-400 bg-green-900/30 px-2 py-1 rounded-full border border-green-500/50" 
+                    : "text-xs font-bold text-gray-400 bg-gray-800 px-2 py-1 rounded-full border border-gray-600";
+            }
+        }
+
+        initFirebase();
+
+        // Listeners
+        function listenForSettings() {
+            if (!window.db || !window.isFirebaseReady) return;
+            const q = query(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'app_settings'));
+            onSnapshot(q, (snapshot) => {
+                let latestTime = 0;
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    if (data.timestamp > latestTime) {
+                        latestTime = data.timestamp;
+                        if (data.token) window.currentExamToken = data.token;
+                        if (data.examDuration) window.currentExamDuration = parseInt(data.examDuration);
+                        if (data.minDuration) window.currentMinExamDuration = parseInt(data.minDuration); 
+                    }
+                });
+                
+                const teacherInput = document.getElementById('teacher-token-input');
+                const durationInput = document.getElementById('teacher-duration-input');
+                const minDurationInput = document.getElementById('teacher-min-duration-input'); 
+                
+                if(teacherInput && document.activeElement !== teacherInput) {
+                    teacherInput.value = window.currentExamToken;
+                }
+                if(durationInput && document.activeElement !== durationInput) {
+                    durationInput.value = window.currentExamDuration;
+                }
+                if(minDurationInput && document.activeElement !== minDurationInput) {
+                    minDurationInput.value = window.currentMinExamDuration;
+                }
+            }, (error) => {
+                console.log("Offline mode triggered by snapshot error");
+                window.isFirebaseReady = false;
+                updateConnectionStatus(false, "Mode Offline (Lokal)");
+            });
+        }
+
+        function listenForQuestions() {
+            if (!window.db || !window.isFirebaseReady) return;
+            const q = query(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'questions'));
+            onSnapshot(q, (snapshot) => {
+                window.allQuestionsDB = [];
+                snapshot.forEach((doc) => {
+                    window.allQuestionsDB.push({ id: doc.id, ...doc.data() });
+                });
+                console.log(`Loaded ${window.allQuestionsDB.length} questions from DB`);
+                
+                if (typeof window.filterQuestionBank === 'function' && !document.getElementById('section-dashboard').classList.contains('hidden-section')) {
+                    window.filterQuestionBank();
+                }
+            }, (err) => {});
+        }
+
+        // --- START EXAM LOG ---
+        window.saveExamStart = async (data) => {
+            if (window.isFirebaseReady && window.db) {
+                try {
+                    data.deviceFingerprint = getDeviceFingerprint();
+                    const docRef = await addDoc(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results'), data);
+                    window.currentExamDocId = docRef.id; 
+                } catch (e) {
+                    console.error("Failed to log start", e);
+                }
+            } else {
+                console.log("Offline: Exam start stored locally only");
+            }
+        }
+
+        // --- SAVE RESULT ---
+        window.saveExamResult = async (data) => {
+            if (window.isFirebaseReady && window.db) {
+                try {
+                    if (window.currentExamDocId) {
+                        await updateDoc(doc(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results', window.currentExamDocId), data);
+                    } else {
+                        await addDoc(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results'), data);
+                    }
+                } catch (e) {
+                    console.error("Failed save", e);
+                    alert("Gagal menyimpan ke database pusat (Offline Mode). Nilai tetap tersimpan di layar ini.");
+                }
+            }
+        }
+
+        // --- SAVE SETTINGS (Updated with Min Duration) ---
+        window.saveSettings = async () => {
+            const newToken = document.getElementById('teacher-token-input').value.trim().toUpperCase();
+            const newDuration = parseInt(document.getElementById('teacher-duration-input').value);
+            const newMinDuration = parseInt(document.getElementById('teacher-min-duration-input').value) || 0; 
+
+            if(!newToken) return alert("Token tidak boleh kosong!");
+            if(!newDuration || newDuration < 1) return alert("Durasi tidak valid (minimal 1 menit)!");
+            if(newMinDuration > newDuration) return alert("Durasi minimal tidak boleh lebih besar dari durasi ujian!");
+
+            if (window.isFirebaseReady && window.db) {
+                await addDoc(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'app_settings'), {
+                    token: newToken,
+                    examDuration: newDuration,
+                    minDuration: newMinDuration, 
+                    timestamp: Date.now()
+                });
+                alert(`Pengaturan Disimpan!\nToken: ${newToken}\nDurasi: ${newDuration} Menit\nMin Submit: ${newMinDuration} Menit`);
+            } else {
+                alert("Mode Offline: Pengaturan tidak tersimpan ke server.");
+            }
+        };
+
+        window.seedDatabase = async () => {
+            if(!window.isFirebaseReady) return alert("Fitur ini butuh koneksi internet (Firebase).");
+            if (!confirm("Apakah Anda yakin ingin mengupload soal bawaan (Hardcoded) ke Database? Ini akan menambah soal ke bank soal yang ada.")) return;
+            const packets = ['A', 'B', 'C'];
+            let count = 0;
+            const btn = document.getElementById('btn-seed-db');
+            if(btn) { btn.disabled = true; btn.innerText = "Sedang Upload..."; }
+
+            try {
+                for (const pkt of packets) {
+                    const questions = questionBank[pkt];
+                    for (const q of questions) {
+                        const exists = window.allQuestionsDB.some(dbQ => dbQ.text === q.text && dbQ.packet === pkt);
+                        if (!exists) {
+                            await addDoc(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'questions'), {
+                                packet: pkt, text: q.text, options: q.options, correct: q.correct, createdAt: Date.now()
+                            });
+                            count++;
+                        }
+                    }
+                }
+                alert(`Berhasil mengupload ${count} soal baru ke database!`);
+            } catch (e) {
+                alert("Gagal upload: " + e.message);
+            } finally {
+                if(btn) { btn.disabled = false; btn.innerHTML = `<i data-lucide="upload-cloud" class="w-4 h-4"></i> Upload Soal Bawaan ke DB`; if(typeof lucide !== 'undefined') lucide.createIcons(); }
+            }
+        };
+
+        window.deleteQuestion = async (id) => {
+            if(!window.isFirebaseReady) return alert("Mode Offline.");
+            if(!confirm("Hapus soal ini?")) return;
+            try { await deleteDoc(doc(window.db, 'artifacts', window.appId, 'public', 'data', 'questions', id)); } catch(e) { alert("Gagal hapus: " + e.message); }
+        };
+        
+        window.deleteExamResult = async (id) => {
+            if(!window.isFirebaseReady) return alert("Mode Offline.");
+            if(!confirm("Apakah Anda yakin ingin MENGHAPUS data ujian siswa ini?\n\nTindakan ini tidak dapat dibatalkan.")) return;
+            try {
+                await deleteDoc(doc(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results', id));
+            } catch(e) {
+                alert("Gagal menghapus: " + e.message);
+            }
+        };
+
+        window.resetAllExamData = async () => {
+            if(!window.isFirebaseReady) return alert("Mode Offline.");
+            const key = prompt("⚠️ PERINGATAN BAHAYA!\n\nAnda akan menghapus SEMUA data hasil ujian seluruh siswa.\nTindakan ini SANGAT TIDAK DAPAT DIBATALKAN.\n\nKetik 'HAPUS SEMUA' (Huruf Besar) untuk konfirmasi:");
+            
+            if (key !== 'HAPUS SEMUA') {
+                return alert("Penghapusan dibatalkan.");
+            }
+
+            const btn = document.getElementById('btn-reset-all');
+            if(btn) { btn.disabled = true; btn.innerText = "Sedang Menghapus..."; }
+
+            try {
+                const q = query(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results'));
+                const snapshot = await getDocs(q);
+                
+                if (snapshot.empty) {
+                    alert("Data sudah kosong.");
+                    return;
+                }
+
+                const deletePromises = [];
+                snapshot.forEach((doc) => {
+                    deletePromises.push(deleteDoc(doc.ref));
+                });
+                
+                await Promise.all(deletePromises);
+                alert(`Berhasil menghapus ${deletePromises.length} data ujian.`);
+                
+            } catch(e) {
+                console.error(e);
+                alert("Gagal mereset data: " + e.message);
+            } finally {
+                if(btn) { btn.disabled = false; btn.innerHTML = `<i data-lucide="trash-2" class="w-4 h-4"></i> Reset Semua Data`; if(typeof lucide !== 'undefined') lucide.createIcons(); }
+            }
+        };
+
+        window.openQuestionModal = (id = null) => {
+            const modal = document.getElementById('modal-question');
+            const form = document.getElementById('form-question');
+            form.reset();
+            document.getElementById('q-id').value = id || '';
+            const optsContainer = document.getElementById('q-options-container');
+            optsContainer.innerHTML = '';
+            
+            if (id) {
+                const q = window.allQuestionsDB.find(x => x.id === id);
+                if (q) {
+                    document.getElementById('q-packet').value = q.packet;
+                    document.getElementById('q-text').value = q.text;
+                    document.getElementById('q-correct').value = q.correct;
+                    q.options.forEach((opt) => addOptionInput(opt));
+                }
+            } else {
+                for(let i=0; i<5; i++) addOptionInput('');
+            }
+            modal.classList.remove('hidden');
+        };
+
+        window.closeQuestionModal = () => { document.getElementById('modal-question').classList.add('hidden'); };
+
+        window.addOptionInput = (value = '') => {
+            const container = document.getElementById('q-options-container');
+            const idx = container.children.length;
+            const div = document.createElement('div');
+            div.className = "flex gap-2 mb-2";
+            div.innerHTML = `
+                <span class="py-2 px-3 bg-gray-100 border rounded text-gray-500 font-mono">${idx}</span>
+                <input type="text" name="options[]" value="${value}" class="flex-1 px-3 py-2 border rounded outline-none focus:ring-1 focus:ring-blue-500" placeholder="Pilihan Jawaban" required>
+                <button type="button" onclick="this.parentElement.remove()" class="text-red-500 hover:bg-red-50 p-2 rounded"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+            `;
+            container.appendChild(div);
+            if(typeof lucide !== 'undefined') lucide.createIcons();
+        };
+
+        window.saveQuestionSubmit = async (e) => {
+            e.preventDefault();
+            if(!window.isFirebaseReady) return alert("Mode Offline: Tidak bisa menyimpan soal.");
+            
+            const id = document.getElementById('q-id').value;
+            const packet = document.getElementById('q-packet').value;
+            const text = document.getElementById('q-text').value;
+            const correct = parseInt(document.getElementById('q-correct').value);
+            const inputs = document.getElementsByName('options[]');
+            const options = [];
+            for(let input of inputs) options.push(input.value);
+            const data = { packet, text, options, correct, updatedAt: Date.now() };
+
+            try {
+                if (id) {
+                    await updateDoc(doc(window.db, 'artifacts', window.appId, 'public', 'data', 'questions', id), data);
+                } else {
+                    data.createdAt = Date.now();
+                    await addDoc(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'questions'), data);
+                }
+                window.closeQuestionModal();
+            } catch (err) { alert("Gagal menyimpan: " + err.message); }
+        };
+
+        window.setupRealtimeListener = () => {
+            if (!window.isFirebaseReady || !window.db) {
+                // Jangan loop selamanya jika offline
+                return;
+            }
+            const q = query(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results'));
+            let isInitialLoad = true;
+
+            onSnapshot(q, (snapshot) => {
+                const results = [];
+                snapshot.forEach((doc) => {
+                    results.push({ id: doc.id, ...doc.data() });
+                });
+                
+                if (!isInitialLoad && window.currentUserRole === 'teacher') {
+                    snapshot.docChanges().forEach((change) => {
+                        if (change.type === "modified" || change.type === "added") {
+                            const data = change.doc.data();
+                            if (data.violations > 0 || (data.status && data.status.includes("DISKUALIFIKASI"))) {
+                                if(window.triggerCheatAlert) window.triggerCheatAlert(data);
+                            }
+                        }
+                    });
+                }
+                isInitialLoad = false;
+
+                results.sort((a, b) => b.timestamp - a.timestamp);
+                if(window.updateDashboardTable) window.updateDashboardTable(results);
+            });
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; user-select: none; }
+        .hidden-section { display: none !important; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .no-copy { user-select: none; -webkit-user-select: none; }
+        #exam-sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar-closed { transform: translateX(100%); }
+        .sidebar-open { transform: translateX(0); }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        #modal-confirm { transition: opacity 0.2s ease-out; }
+        #modal-confirm.show { opacity: 1; }
+        #modal-content { transition: transform 0.2s ease-out; }
+        #modal-confirm.show #modal-content { transform: scale(100%); }
+    </style>
+</head>
+<body>
+
+    <!-- SECTION: LOGIN -->
+    <div id="section-login" class="min-h-screen flex items-center justify-center p-4 bg-slate-900">
+        <div class="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div class="bg-blue-600 p-6 text-center relative">
+                <div class="absolute top-4 right-4">
+                    <span id="connection-status" class="text-xs font-bold text-yellow-200 bg-yellow-900/30 px-2 py-1 rounded-full border border-yellow-500/50">Menghubungkan...</span>
+                </div>
+                <h1 class="text-2xl font-bold text-white flex flex-col items-center justify-center gap-2 mt-2">
+                    <img src="images/logotkj.png" onerror="this.src='https://via.placeholder.com/150?text=Logo+TKJ'" alt="Logo TKJ" class="w-20 h-20 object-contain mb-2 bg-white rounded-full p-1">
+                    STS Prakarya dan Kewirausahaan Jurusan TKJ
+                </h1>
+                <p class="text-blue-100 text-sm mt-1">Sumatif Tengah Semester</p>
+            </div>
+            <div class="flex border-b">
+                <button id="tab-student" onclick="window.switchLoginTab('student')" class="flex-1 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 transition-colors">Login Siswa</button>
+                <button id="tab-teacher" onclick="window.switchLoginTab('teacher')" class="flex-1 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors">Login Guru</button>
+            </div>
+            <div class="p-8">
+                <form id="form-student" onsubmit="window.handleStudentLogin(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Nama Lengkap</label>
+                        <input type="text" id="student-name" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Contoh: Ahmad Dhani">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Kelas</label>
+                        <select id="student-class" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            <option value="">Pilih Kelas</option>
+                            <option value="XI TKJ 1">XI TKJ 1</option>
+                            <option value="XI TKJ 2">XI TKJ 2</option>
+                            <option value="XII TKJ 1">XII TKJ 1</option>
+							<option value="XII TKJ 2">XII TKJ 2</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Paket Soal</label>
+                        <div class="grid grid-cols-3 gap-2" id="packet-selector">
+                            <button type="button" onclick="window.selectPacket('A')" id="pkt-A" class="pkt-btn py-2 border rounded-lg font-bold bg-blue-600 text-white border-blue-600">Paket A <br>(XI TKJ 1)</button>
+                            <button type="button" onclick="window.selectPacket('B')" id="pkt-B" class="pkt-btn py-2 border rounded-lg font-bold bg-white text-gray-600 hover:bg-gray-50">Paket B <br>(XI TKJ 2)</button>
+                            <button type="button" onclick="window.selectPacket('C')" id="pkt-C" class="pkt-btn py-2 border rounded-lg font-bold bg-white text-gray-600 hover:bg-gray-50">Paket C <br>(XII TKJ)</button>
+                        </div>
+                        <input type="hidden" id="selected-packet" value="A">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Token Ujian</label>
+                        <input type="text" id="student-token" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none uppercase font-mono tracking-widest text-center bg-gray-50" placeholder="MASUKKAN TOKEN">
+                        <p class="text-xs text-gray-400 mt-1 text-center">*Minta token kepada Guru/Pengawas (Default: TKJ2025)</p>
+                    </div>
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow-lg mt-2 transform transition hover:scale-[1.02]">MULAI UJIAN</button>
+                </form>
+                <form id="form-teacher" onsubmit="window.handleTeacherLogin(event)" class="space-y-4 hidden-section">
+                    <input type="text" id="teacher-user" placeholder="Username" class="w-full px-4 py-2 border rounded-lg outline-none">
+                    <input type="password" id="teacher-pass" placeholder="Password" class="w-full px-4 py-2 border rounded-lg outline-none">
+                    <button type="submit" class="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-3 rounded-lg shadow-lg">Masuk Dashboard</button>
+                </form>
+            </div>
+				 <!-- COPYRIGHT FOOTER -->
+            <div class="bg-gray-50 p-3 text-center border-t">
+                <p class="text-[10px] text-gray-400 font-medium">
+                    &copy; 2026 Nailul Authar - TKJ SMK Negeri 1 Brondong
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SECTION: EXAM -->
+    <div id="section-exam" class="hidden-section min-h-screen bg-slate-100 flex flex-col no-copy relative overflow-hidden">
+        <header class="bg-white shadow-sm border-b sticky top-0 z-30">
+            <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <img src="images/logotkj.png" onerror="this.src='https://via.placeholder.com/50?text=TKJ'" alt="Logo TKJ" class="w-10 h-10 object-contain">
+                    <div>
+                        <h2 class="font-bold text-gray-800" id="header-name">Nama Siswa</h2>
+                        <p class="text-xs text-gray-500" id="header-detail">Kelas • Paket A (Kelas XI)</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div id="timer-box" class="flex items-center gap-2 px-4 py-2 rounded-lg font-mono font-bold text-lg bg-blue-50 text-blue-600">
+                        <i data-lucide="clock" class="w-5 h-5"></i> <span id="timer-display">--:--</span>
+                    </div>
+                    <button onclick="window.toggleSidebar()" class="ml-2 p-2 rounded-lg hover:bg-slate-100 border border-slate-200 text-slate-700 flex items-center gap-2">
+                        <i data-lucide="grid-3x3" class="w-5 h-5"></i> <span class="hidden md:inline text-sm font-semibold">Daftar Soal</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+        <main class="flex-1 w-full max-w-4xl mx-auto p-4 md:p-8 flex flex-col h-[calc(100vh-64px)] overflow-y-auto">
+            <div id="question-area" class="flex-1"></div>
+            <div class="mt-6 pt-4 border-t flex justify-between items-center bg-slate-100 sticky bottom-0 z-20 pb-4">
+                <button id="btn-prev" onclick="window.changeQuestion(-1)" class="px-6 py-2 rounded-lg font-semibold bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i data-lucide="chevron-left" class="w-4 h-4 inline mr-1"></i> Sebelumnya
+                </button>
+                <button id="btn-next" onclick="window.changeQuestion(1)" class="px-6 py-2 rounded-lg font-semibold bg-blue-600 text-white hover:bg-blue-700 shadow-sm flex items-center">
+                    Selanjutnya <i data-lucide="chevron-right" class="w-4 h-4 inline ml-1"></i>
+                </button>
+                 <button id="btn-finish-main" onclick="window.confirmFinishExam()" class="hidden px-6 py-2 rounded-lg font-semibold bg-green-600 text-white hover:bg-green-700 shadow-sm flex items-center gap-2">
+                    <i data-lucide="check-circle" class="w-4 h-4"></i> Selesai
+                </button>
+            </div>
+        </main>
+        <div id="exam-sidebar" class="fixed top-16 right-0 bottom-0 w-80 bg-white shadow-2xl border-l border-slate-200 z-40 sidebar-closed flex flex-col">
+            <div class="p-4 border-b bg-slate-50 flex justify-between items-center">
+                <h3 class="font-bold text-gray-800">Navigasi Soal</h3>
+                <button onclick="window.toggleSidebar()" class="text-gray-500 hover:text-gray-700">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <div class="p-4 overflow-y-auto flex-1">
+                <div id="question-grid" class="grid grid-cols-5 gap-3"></div>
+            </div>
+            <div class="p-4 border-t bg-slate-50">
+                <div class="flex gap-2 text-xs mb-4 justify-center">
+                    <div class="flex items-center gap-1"><div class="w-3 h-3 bg-green-500 rounded-full"></div> Dijawab</div>
+                    <div class="flex items-center gap-1"><div class="w-3 h-3 bg-slate-200 border rounded-full"></div> Belum</div>
+                    <div class="flex items-center gap-1"><div class="w-3 h-3 border-2 border-blue-500 rounded-full"></div> Aktif</div>
+                </div>
+                <button onclick="window.confirmFinishExam()" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded-lg shadow flex items-center justify-center gap-2">
+                    <i data-lucide="log-out" class="w-4 h-4"></i> Hentikan Ujian
+                </button>
+            </div>
+        </div>
+        <div id="sidebar-overlay" onclick="window.toggleSidebar()" class="fixed inset-0 bg-black/20 z-30 hidden" style="top: 64px;"></div>
+    </div>
+
+    <!-- MODAL CONFIRMATION -->
+    <div id="modal-confirm" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden opacity-0 transition-opacity duration-300">
+        <div class="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 transform scale-90 transition-transform duration-300" id="modal-content">
+            <div class="text-center">
+                <div class="w-16 h-16 bg-yellow-100 text-yellow-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i data-lucide="alert-triangle" class="w-8 h-8"></i>
+                </div>
+                <h3 class="text-xl font-bold text-gray-800 mb-2">Selesai Ujian?</h3>
+                <p class="text-gray-500 text-sm mb-6" id="modal-desc">Waktu masih ada. Apakah Anda yakin ingin mengakhiri ujian ini sekarang?</p>
+                <div class="flex gap-3">
+                    <button onclick="window.closeModal()" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 font-semibold hover:bg-gray-50 transition-colors">Batal</button>
+                    <button onclick="window.finalFinish()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/30 transition-all active:scale-95">Ya, Selesai</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL ADD/EDIT QUESTION -->
+    <div id="modal-question" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+        <div class="bg-white rounded-xl shadow-2xl p-6 max-w-2xl w-full mx-4 overflow-y-auto max-h-[90vh]">
+            <div class="flex justify-between items-center mb-4 border-b pb-2">
+                <h3 class="text-xl font-bold text-gray-800">Editor Soal</h3>
+                <button onclick="window.closeQuestionModal()" class="text-gray-500 hover:text-gray-700"><i data-lucide="x" class="w-6 h-6"></i></button>
+            </div>
+            <form id="form-question" onsubmit="window.saveQuestionSubmit(event)">
+                <input type="hidden" id="q-id">
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Paket Soal</label>
+                        <select id="q-packet" class="w-full px-3 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="A">Paket A (Kelas XI)</option>
+                            <option value="B">Paket B (Kelas XII)</option>
+                            <option value="C">Paket C (UKK)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Kunci Jawaban (Index 0-4)</label>
+                        <input type="number" id="q-correct" min="0" max="4" class="w-full px-3 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" required>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Pertanyaan</label>
+                    <textarea id="q-text" rows="3" class="w-full px-3 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" required></textarea>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Pilihan Jawaban</label>
+                    <div id="q-options-container">
+                        <!-- Dynamic Inputs -->
+                    </div>
+                    <button type="button" onclick="window.addOptionInput()" class="mt-2 text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1">+ Tambah Opsi</button>
+                </div>
+                <div class="flex justify-end gap-2 pt-4 border-t">
+                    <button type="button" onclick="window.closeQuestionModal()" class="px-4 py-2 border rounded-lg text-gray-700 hover:bg-gray-50">Batal</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-bold">Simpan Soal</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- MODAL CHEATING ALERT -->
+    <div id="modal-cheat-alert" class="fixed inset-0 z-[60] flex items-center justify-center bg-red-900/90 backdrop-blur-sm hidden animate-fade-in">
+        <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-lg w-full mx-4 text-center border-4 border-red-600 relative overflow-hidden">
+            <!-- Background pulse effect -->
+            <div class="absolute inset-0 bg-red-50 animate-pulse -z-10"></div>
+            
+            <div class="w-24 h-24 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6 border-4 border-red-200">
+                <i data-lucide="siren" class="w-12 h-12 animate-bounce"></i>
+            </div>
+            
+            <h2 class="text-3xl font-extrabold text-red-700 mb-2 uppercase tracking-wider">PERINGATAN BAHAYA!</h2>
+            <h3 class="text-xl font-bold text-gray-800 mb-4" id="cheat-student-name">Nama Siswa</h3>
+            
+            <div class="bg-red-100 border border-red-200 p-4 rounded-xl mb-6">
+                <p class="text-red-800 font-semibold text-lg" id="cheat-message">Terdeteksi melakukan kecurangan!</p>
+                <div class="mt-2 text-sm text-red-600">
+                    Status: <span id="cheat-status" class="font-bold">DISKUALIFIKASI</span> | 
+                    Pelanggaran: <span id="cheat-count" class="font-bold">3x</span>
+                </div>
+            </div>
+            
+            <button onclick="window.closeCheatAlert()" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-xl shadow-lg hover:shadow-red-500/50 transition-all active:scale-95 text-lg uppercase tracking-wide">
+                MENGERTI & TUTUP
+            </button>
+        </div>
+    </div>
+    
+    <!-- MODAL VIOLATION DETAILS (NEW) -->
+    <div id="modal-violation-details" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+        <div class="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 animate-fade-in">
+            <div class="flex justify-between items-center mb-4 border-b pb-2">
+                <h3 class="text-lg font-bold text-red-600 flex items-center gap-2">
+                    <i data-lucide="alert-triangle" class="w-5 h-5"></i> Detail Pelanggaran
+                </h3>
+                <button onclick="document.getElementById('modal-violation-details').classList.add('hidden')" class="text-gray-500 hover:text-gray-700">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <div class="mb-4">
+                <p class="text-sm text-gray-600 mb-2">Siswa: <span id="violation-student-name" class="font-bold text-gray-800">Nama Siswa</span></p>
+                <div class="bg-red-50 p-2 rounded text-xs text-red-600 mb-2 border border-red-100 flex items-start gap-2">
+                    <i data-lucide="info" class="w-4 h-4 shrink-0 mt-0.5"></i>
+                    <span>Log ini mencatat waktu dan alasan sistem mendeteksi ketidakjujuran selama ujian berlangsung.</span>
+                </div>
+                <div id="violation-list" class="space-y-2 max-h-60 overflow-y-auto bg-gray-50 p-3 rounded-lg border">
+                    <!-- Logs go here -->
+                </div>
+            </div>
+            <div class="flex justify-end">
+                <button onclick="document.getElementById('modal-violation-details').classList.add('hidden')" class="px-4 py-2 bg-gray-800 text-white rounded-lg text-sm font-bold shadow hover:bg-gray-900">Tutup</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- SECTION: DASHBOARD GURU -->
+    <div id="section-dashboard" class="hidden-section min-h-screen bg-slate-50 flex flex-col">
+        <header class="bg-slate-900 text-white shadow-lg">
+            <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="bg-blue-500 p-2 rounded-lg"><i data-lucide="monitor" class="w-6 h-6 text-white"></i></div>
+                    <div><h1 class="font-bold text-lg">Panel Guru / Admin</h1><p class="text-xs text-slate-400">Monitoring & Bank Soal</p></div>
+                </div>
+                <button onclick="window.logout()" class="text-slate-300 hover:text-white flex items-center gap-2 text-sm"><i data-lucide="log-out" class="w-4 h-4"></i> Keluar</button>
+            </div>
+        </header>
+        <main class="flex-1 max-w-7xl mx-auto w-full p-6">
+            
+            <!-- TABS DASHBOARD -->
+            <div class="flex gap-4 mb-6 border-b">
+                <button onclick="window.switchDashTab('nilai')" id="tab-dash-nilai" class="pb-3 border-b-2 border-blue-600 font-bold text-blue-600 px-4">Monitoring Nilai</button>
+                <button onclick="window.switchDashTab('soal')" id="tab-dash-soal" class="pb-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 font-bold px-4">Bank Soal (Database)</button>
+            </div>
+
+            <!-- PANEL 1: MONITORING NILAI -->
+            <div id="panel-nilai">
+                <!-- MODIFIED: PENGATURAN TOKEN DAN DURASI -->
+                <div class="bg-white rounded-xl shadow-sm border p-6 mb-6">
+                    <h2 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i data-lucide="settings" class="w-5 h-5 text-gray-600"></i> Pengaturan Ujian</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <!-- Input Token -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Token Akses</label>
+                            <div class="flex gap-2">
+                                <div class="bg-blue-50 p-2 rounded border border-blue-200 flex items-center justify-center">
+                                    <i data-lucide="key" class="w-5 h-5 text-blue-600"></i>
+                                </div>
+                                <input type="text" id="teacher-token-input" class="w-full px-4 py-2 border rounded-lg font-mono text-xl font-bold tracking-widest text-center uppercase text-blue-600 bg-gray-50 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="LOADING..." value="TKJ2025">
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Token wajib diisi siswa untuk login.</p>
+                        </div>
+                        
+                        <!-- Input Durasi -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Durasi Ujian (Menit)</label>
+                            <div class="flex gap-2">
+                                <div class="bg-orange-50 p-2 rounded border border-orange-200 flex items-center justify-center">
+                                    <i data-lucide="clock" class="w-5 h-5 text-orange-600"></i>
+                                </div>
+                                <input type="number" id="teacher-duration-input" min="1" class="w-full px-4 py-2 border rounded-lg font-bold text-center text-orange-600 bg-gray-50 focus:ring-2 focus:ring-orange-500 outline-none" placeholder="60" value="60">
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Waktu hitung mundur otomatis.</p>
+                        </div>
+                        
+                        <!-- NEW: Input Min Duration -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Min. Submit (Menit)</label>
+                            <div class="flex gap-2">
+                                <div class="bg-red-50 p-2 rounded border border-red-200 flex items-center justify-center">
+                                    <i data-lucide="hourglass" class="w-5 h-5 text-red-600"></i>
+                                </div>
+                                <input type="number" id="teacher-min-duration-input" min="0" class="w-full px-4 py-2 border rounded-lg font-bold text-center text-red-600 bg-gray-50 focus:ring-2 focus:ring-red-500 outline-none" placeholder="0" value="0">
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Siswa tidak bisa submit sebelum waktu ini.</p>
+                        </div>
+                    </div>
+                    <div class="mt-4 flex justify-end">
+                         <button onclick="window.saveSettings()" class="bg-gray-800 hover:bg-gray-900 text-white px-6 py-2 rounded-lg font-bold shadow-md active:scale-95 transition-transform flex items-center gap-2">
+                             <i data-lucide="save" class="w-4 h-4"></i> Simpan Pengaturan
+                         </button>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+                    <div class="p-6 border-b flex flex-col gap-4">
+                        <div class="flex justify-between items-center">
+                            <h2 class="text-lg font-bold text-gray-800">Filter Data Hasil Ujian</h2>
+                            <div class="flex gap-2">
+                                <button id="btn-reset-all" onclick="window.resetAllExamData()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-sm transition hover:scale-105"><i data-lucide="trash-2" class="w-4 h-4"></i> Reset Semua Data</button>
+                                <button onclick="window.exportToCSV()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-sm transition hover:scale-105"><i data-lucide="download" class="w-4 h-4"></i> Export Data Terpilih</button>
+                            </div>
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-50 p-4 rounded-lg border border-gray-200">
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-500 mb-1">Paket Soal</label>
+                                <select id="filter-session" onchange="window.filterDashboard()" class="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+                                    <option value="all">Semua Paket</option>
+                                    <option value="A">Paket A <br> (Kelas XI TKJ 1)</option>
+                                    <option value="B">Paket B <br>(Kelas XI TKJ 2)</option>
+                                    <option value="C">Paket C <br> (Kelas XII)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-500 mb-1">Kelas</label>
+                                <select id="filter-class" onchange="window.filterDashboard()" class="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+                                    <option value="all">Semua Kelas</option>
+                                    <option value="XI TKJ 1">XI TKJ 1</option>
+									<option value="XI TKJ 2">XI TKJ 2</option>
+									<option value="XII TKJ 1">XII TKJ 1</option>
+									<option value="XII TKJ 2">XII TKJ 2</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-500 mb-1">Tanggal Ujian</label>
+                                <input type="date" id="filter-date" onchange="window.filterDashboard()" class="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-gray-600">
+                            <thead class="bg-gray-50 text-gray-900 font-semibold border-b">
+                                <tr>
+                                    <th class="px-6 py-4">Waktu</th>
+                                    <th class="px-6 py-4">Nama Siswa</th>
+                                    <th class="px-6 py-4">Kelas</th>
+                                    <th class="px-6 py-4">Paket</th>
+                                    <th class="px-6 py-4 text-center">Nilai</th>
+                                    <th class="px-6 py-4">Status</th>
+                                    <th class="px-6 py-4 text-center">Pelanggaran</th>
+                                    <th class="px-6 py-4 text-center">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dashboard-table-body" class="divide-y divide-gray-100">
+                                <tr><td colspan="8" class="px-6 py-12 text-center text-gray-400">Menunggu data ujian...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PANEL 2: MANAJEMEN SOAL (BANK SOAL) -->
+            <div id="panel-soal" class="hidden-section">
+                <div class="bg-white rounded-xl shadow-sm border p-6 mb-6">
+                    <div class="flex flex-col md:flex-row justify-between items-center gap-4 mb-6">
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-800">Bank Soal Database</h2>
+                            <p class="text-gray-500 text-sm">Kelola soal untuk Paket A, B, dan C secara real-time.</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="btn-seed-db" onclick="window.seedDatabase()" class="bg-gray-800 hover:bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2"><i data-lucide="upload-cloud" class="w-4 h-4"></i> Upload Soal Bawaan ke DB</button>
+                            <button onclick="window.openQuestionModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2"><i data-lucide="plus" class="w-4 h-4"></i> Tambah Soal Baru</button>
+                        </div>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">Filter Paket Soal</label>
+                        <select id="filter-bank-packet" onchange="window.filterQuestionBank()" class="w-full md:w-64 px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+                            <option value="all">Semua Paket</option>
+                                <option value="A">Paket A (Kelas XI TKJ 1)</option>
+                                    <option value="B">Paket B (Kelas XI TKJ 2)</option>
+                                    <option value="C">Paket C (Kelas XII)</option>
+                        </select>
+                    </div>
+
+                    <div class="overflow-x-auto border rounded-lg">
+                        <table class="w-full text-left text-sm text-gray-600">
+                            <thead class="bg-gray-50 text-gray-900 font-semibold border-b">
+                                <tr>
+                                    <th class="px-4 py-3 w-16">Paket</th>
+                                    <th class="px-4 py-3">Pertanyaan</th>
+                                    <th class="px-4 py-3 w-32 text-center">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="bank-soal-body" class="divide-y divide-gray-100">
+                                <tr><td colspan="3" class="px-6 py-8 text-center text-gray-400">Memuat soal dari database...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- SECTION: RESULT -->
+    <div id="section-result" class="hidden-section min-h-screen bg-slate-900 flex flex-col items-center justify-start pt-10 p-4 overflow-y-auto">
+        <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-2xl w-full text-center relative mb-8">
+            <div id="result-icon-container" class="w-20 h-20 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6"><i data-lucide="check-circle" class="w-10 h-10"></i></div>
+            <h2 id="result-title" class="text-2xl font-bold text-gray-800 mb-2">Ujian Selesai!</h2>
+            <p id="result-message" class="text-gray-500 mb-6">Jawaban telah terkirim ke server.</p>
+            <div class="bg-slate-50 rounded-xl p-6 mb-4 border border-slate-200">
+                <p class="text-sm text-gray-500 uppercase tracking-wider font-semibold mb-1">Nilai Anda</p>
+                <p id="final-score-display" class="text-5xl font-extrabold text-blue-600">0</p>
+            </div>
+            <div id="motivational-message" class="mb-6 px-4 py-3 rounded-lg font-bold text-sm md:text-base border-l-4"></div>
+            <div class="flex flex-col gap-3">
+                <button onclick="window.toggleReview()" id="btn-review" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-transform active:scale-95">
+                    <i data-lucide="book-open" class="w-5 h-5"></i> Lihat Pembahasan
+                </button>
+                <button onclick="location.reload()" class="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-lg transition-transform active:scale-95">Kembali ke Login</button>
+            </div>
+        </div>
+        <div id="review-container" class="w-full max-w-2xl bg-white rounded-2xl shadow-xl p-6 hidden mb-10">
+            <h3 class="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2 border-b pb-2">
+                <i data-lucide="file-check" class="w-6 h-6 text-blue-600"></i> Pembahasan Soal
+            </h3>
+            <div id="review-list" class="space-y-6"></div>
+            <div class="mt-8 pt-6 border-t border-gray-100">
+                <button onclick="location.reload()" class="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-lg shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
+                    <i data-lucide="log-out" class="w-5 h-5"></i> Selesai Belajar & Keluar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LOGIC SCRIPT -->
+    <script>
+        // --- DATA SOAL STATIC (FALLBACK & SEED) ---
+        const questionBank = {
+            A: [
+                // LITERASI
+                { id: 1, text: "Rizki adalah siswa kelas XI TKJ di SMKN 1 Brondong. Gurunya memberi tugas membuat project jaringan komputer, namun Rizki selalu gagal dalam konfigurasi router. Ia merasa dirinya tidak berbakat di bidang networking dan menyerah. \"Saya memang tidak punya bakat jadi teknisi jaringan,\" katanya. Berdasarkan cerita di atas, pola pikir yang dimiliki Rizki adalah...", options: ["Growth mindset karena mau mencoba mengerjakan tugas", "Fixed mindset karena menganggap kemampuannya sudah terbatas dan tidak bisa berkembang", "Pola pikir inovatif dalam networking", "Pola pikir kreatif dalam pemrograman", "Pola pikir pantang menyerah"], correct: 1 },
+                { id: 2, text: "Fahrul, lulusan TKJ SMKN 1 Brondong, membuka usaha service komputer. Ia melihat banyak warga kesulitan akses internet. Fahrul berinovasi menawarkan jasa instalasi jaringan RT/RW Net dengan harga terjangkau. Usahanya berkembang pesat. Karakter wirausaha yang paling menonjol ditunjukkan Fahrul adalah...", options: ["Jujur dalam memberikan pelayanan", "Inovatif dan kreatif melihat peluang bisnis", "Berani mengambil risiko saja", "Rasa ingin tahu terhadap teknologi saja", "Pantang menyerah dalam bekerja"], correct: 1 },
+                { id: 3, text: "Devi, siswi kelas XII TKJ SMKN 1 Brondong, membuat website untuk UMKM lokal. Awalnya sepi dan teman-temannya pesimis. Devi tidak menyerah, belajar SEO dan digital marketing, hingga kini websitenya ramai. Sikap Devi menunjukkan ia memiliki...", options: ["Fixed mindset karena awalnya gagal", "Growth mindset karena terus belajar dan tidak menyerah mengembangkan kemampuannya", "Sikap mudah terpengaruh pendapat orang", "Kemampuan yang terbatas dalam web development", "Bakat alami dalam bisnis digital"], correct: 1 },
+                { id: 4, text: "Pak Hendra, guru produktif TKJ di SMKN 1 Brondong, selalu mendorong siswa memiliki rasa ingin tahu tinggi terhadap teknologi baru (Cloud, IoT, Cybersecurity). Rasa ingin tahu yang tinggi penting bagi wirausaha karena...", options: ["Membuat seseorang selalu ikut campur urusan bisnis orang lain", "Membantu menemukan peluang bisnis baru dan solusi inovatif di bidang teknologi", "Membuat seseorang tidak fokus pada satu bidang usaha", "Agar bisa mengetahui rahasia kompetitor secara ilegal", "Supaya terlihat pintar di depan pelanggan"], correct: 1 },
+                { id: 5, text: "Andi membuka jasa instalasi CCTV di Brondong. Ia mengklaim \"Menggunakan kamera CCTV berteknologi AI dari Jepang\" padahal menggunakan kamera lokal biasa. Pelanggan kecewa. Karakter wirausaha yang TIDAK dimiliki Andi adalah...", options: ["Inovatif dalam pemasaran", "Berani mengambil risiko bisnis", "Jujur dalam berbisnis", "Rasa ingin tahu terhadap produk", "Kreatif dalam promosi"], correct: 2 },
+                { id: 6, text: "Siswa TKJ SMKN 1 Brondong sedang belajar tentang kreativitas. Kreativitas dalam kewirausahaan dapat didefinisikan sebagai...", options: ["Kemampuan meniru bisnis kompetitor dengan sempurna", "Bakat alami yang hanya dimiliki orang-orang tertentu sejak lahir", "Kemampuan menghasilkan ide-ide baru dan solusi unik untuk memecahkan masalah", "Keterampilan menjual produk teknologi dengan harga setinggi-tingginya", "Kemampuan menghasilkan uang sebanyak-banyaknya tanpa peduli cara"], correct: 2 },
+                { id: 7, text: "Siti, lulusan TKJ SMKN 1 Brondong, ingin membuka warnet gaming. Ia sudah buat proposal dan hitung modal Rp 50 juta. Namun karena takut gagal dan merugi, ia membatalkan rencananya dan memilih jadi karyawan. Karakter wirausaha yang belum dimiliki Siti adalah...", options: ["Jujur dalam perencanaan", "Inovatif membuat proposal", "Berani mengambil risiko dalam berbisnis", "Rasa ingin tahu terhadap peluang", "Kreatif dalam perencanaan bisnis"], correct: 2 },
+                { id: 8, text: "Dalam pembelajaran PKK di kelas TKJ SMKN 1 Brondong, guru menjelaskan perbedaan pola pikir. Perbedaan utama antara growth mindset dan fixed mindset dalam kewirausahaan adalah...", options: ["Growth mindset percaya kemampuan bisa berkembang dengan usaha, fixed mindset percaya kemampuan sudah tetap sejak lahir", "Growth mindset hanya untuk orang kaya, fixed mindset untuk orang miskin", "Growth mindset tidak pernah mengalami kegagalan, fixed mindset selalu gagal", "Growth mindset tidak perlu belajar lagi, fixed mindset harus terus belajar", "Keduanya sama saja tidak ada bedanya dalam berwirausaha"], correct: 0 },
+                { id: 9, text: "Bayu, alumni TKJ SMKN 1 Brondong, 3 kali gagal bisnis (aksesoris, jasa setting, pulsa). Ia tidak menyerah, belajar dari kesalahan, dan mencoba lagi konsep baru hingga sukses di jasa website. Karakter wirausaha yang paling menonjol dari Bayu adalah...", options: ["Jujur kepada pelanggan", "Pantang menyerah dan terus berusaha", "Rasa ingin tahu tentang teknologi", "Inovatif membuat produk baru", "Berani mengambil risiko besar"], correct: 1 },
+                { id: 10, text: "Di laboratorium TKJ SMKN 1 Brondong, siswa diajarkan menerapkan kreativitas. Kreativitas dalam kehidupan sehari-hari khususnya bidang TKJ dapat diterapkan dengan cara...", options: ["Hanya mengikuti tutorial yang ada di internet tanpa modifikasi", "Selalu menunggu guru memberikan solusi untuk setiap masalah", "Mencari solusi unik dan berbeda untuk masalah teknis yang dihadapi", "Menghindari hal-hal baru yang belum pernah dipelajari di sekolah", "Hanya fokus mengerjakan tugas rutin yang sudah diajarkan"], correct: 2 },
+                
+                // NUMERASI
+                { id: 11, text: "Rina, siswi kelas XI TKJ, mengikuti pelatihan 5 hari dengan materi berbeda tiap hari. Jika ia harus memilih kombinasi 3 karakter paling tepat untuk membuka usaha service komputer baru, kombinasi mana yang paling diperlukan?", options: ["Rasa ingin tahu, Berani mengambil risiko, Jujur", "Pantang menyerah, Inovatif, Jujur", "Berani mengambil risiko, Pantang menyerah, Inovatif", "Rasa ingin tahu, Inovatif, Pantang menyerah", "Semua karakter sama pentingnya (5 karakter)"], correct: 2 },
+                { id: 12, text: "Pak Hendra memberikan 4 pernyataan tentang mindset. (1) Tidak berbakat, (2) Kegagalan adalah belajar, (3) Kemampuan sudah maksimal, (4) Dengan latihan bisa lebih baik. Berapa jumlah pernyataan yang menunjukkan growth mindset?", options: ["1 pernyataan", "2 pernyataan", "3 pernyataan", "4 pernyataan", "Tidak ada yang menunjukkan growth mindset"], correct: 1 },
+                { id: 13, text: "Dimas ikut lomba LKS. Tahun 1: Gagal penyisihan. Tahun 2: Semifinal. Tahun 3: Juara 2 Provinsi. Ini menunjukkan konsep mindset apa dan berapa tingkat peningkatan prestasinya (jumlah tahap)?", options: ["Fixed mindset, peningkatan 1 tahap", "Growth mindset, peningkatan 2 tahap", "Growth mindset, peningkatan 3 tahap", "Fixed mindset, peningkatan 3 tahap", "Growth mindset, tidak ada peningkatan"], correct: 1 },
+                { id: 14, text: "Siswa kelas X TKJ membuat project kreatif barang bekas. Hasil: 6 sangat inovatif, 12 cukup kreatif, 8 biasa, 4 tidak mengumpulkan. Berapa persen siswa yang menunjukkan kreativitas tinggi (sangat inovatif dan cukup kreatif)?", options: ["40%", "50%", "60%", "70%", "80%"], correct: 2 },
+                { id: 15, text: "Fahrul merencanakan target pelanggan: Bulan 1-2 (10 pelanggan), Bulan 3-4 (5 pelanggan), Bulan 5-6 (8 pelanggan). Karakter apa yang ditunjukkan dan berapa total target 6 bulan?", options: ["Berani mengambil risiko, 20 pelanggan", "Rasa ingin tahu, 23 pelanggan", "Inovatif dan terencana, 23 pelanggan", "Pantang menyerah, 25 pelanggan", "Jujur, 30 pelanggan"], correct: 2 },
+                { id: 16, text: "Siti menghadapi 5 kegagalan dalam mengembangkan aplikasi, namun terus belajar. Pada percobaan ke-6, aplikasinya berhasil. Sikap ini menunjukkan karakter apa dan berapa kali total ia mencoba?", options: ["Jujur, 5 kali", "Inovatif, 5 kali", "Pantang menyerah, 6 kali", "Berani mengambil risiko, 6 kali", "Rasa ingin tahu, 7 kali"], correct: 2 },
+                { id: 17, text: "Skor kreativitas: Meniru=1, Modifikasi=2, Inovasi=3. Reza membuat 4 ide: 1 meniru, 2 modifikasi, 1 inovasi. Berapa total skor kreativitas Reza?", options: ["6", "7", "8", "9", "10"], correct: 2 },
+                { id: 18, text: "Bayu ingin mengembangkan 5 karakter wirausaha. Ada 2 karakter dasar (rasa ingin tahu & berani ambil risiko) yang harus dikuasai pertama. Jika tiap karakter butuh 2 bulan, berapa bulan untuk menguasai 2 karakter dasar tersebut?", options: ["2 bulan", "4 bulan", "6 bulan", "8 bulan", "10 bulan"], correct: 1 },
+                { id: 19, text: "Dari 24 siswa, 18 memilih bangkit dan coba lagi (growth mindset), 6 memilih menyerah (fixed mindset). Berapa persentase siswa yang menunjukkan growth mindset?", options: ["25%", "50%", "65%", "75%", "80%"], correct: 3 },
+                { id: 20, text: "Andi memilih ide bisnis: Riset 5 ide -> Pilih 3 -> Uji coba 2 -> Luncurkan 1. Berapa total ide yang diriset dan berapa yang diluncurkan?", options: ["Riset 5 ide, luncurkan 3 ide", "Riset 5 ide, luncurkan 2 ide", "Riset 5 ide, luncurkan 1 ide", "Riset 3 ide, luncurkan 1 ide", "Riset 3 ide, luncurkan 2 ide"], correct: 2 }
+            ],
+            B: [
+                // LITERASI
+                { id: 1, text: "Ahmad, siswa kelas XII TKJ SMKN 1 Brondong, mendapat nilai jelek saat ujian praktik instalasi server. Ia berkata kepada temannya, \"Saya memang bodoh, tidak akan pernah bisa menguasai materi server. Lebih baik saya fokus ke hal lain saja.\" Ahmad pun tidak mau belajar lagi tentang server. Pola pikir yang ditunjukkan Ahmad adalah...", options: ["Growth mindset karena mau mencari fokus baru", "Growth mindset karena realistis dengan kemampuan", "Fixed mindset karena percaya kemampuannya tidak bisa berkembang", "Pola pikir inovatif dalam belajar", "Pola pikir kreatif dalam menyelesaikan masalah"], correct: 2 },
+                { id: 2, text: "Ibu Zahra, alumni TKJ SMKN 1 Brondong, membuka usaha fotocopy dan print di dekat sekolah. Ia melihat banyak siswa yang kesulitan mengedit dokumen. Ibu Zahra kemudian menambah layanan jasa pengetikan, editing dokumen, dan desain grafis sederhana. Kini usahanya menjadi one-stop service untuk kebutuhan siswa dan tidak hanya bergantung pada fotocopy saja. Karakter wirausaha yang paling dominan ditunjukkan Ibu Zahra adalah...", options: ["Jujur dalam memberikan layanan terbaik", "Pantang menyerah menghadapi persaingan", "Kreatif dan inovatif mengembangkan layanan bisnis", "Berani mengambil risiko membuka usaha", "Rasa ingin tahu tentang kebutuhan pasar"], correct: 2 },
+                { id: 3, text: "Yoga, siswa kelas XI TKJ, membuat aplikasi mobile untuk mencatat tugas sekolah. Aplikasi pertamanya crash terus dan tidak ada yang mau pakai. Teman-temannya bilang \"kamu tidak cocok jadi programmer.\" Namun Yoga tidak putus asa. Ia bertanya ke kakak kelasnya, menonton tutorial YouTube, belajar dari forum online, dan terus memperbaiki coding-nya. Setelah 3 bulan, aplikasinya berhasil dan digunakan 100 siswa TKJ. Sikap Yoga menunjukkan ia memiliki...", options: ["Fixed mindset karena awalnya gagal membuat aplikasi", "Bakat alami sebagai programmer sejak lahir", "Growth mindset karena percaya kemampuan bisa berkembang dengan belajar", "Sikap mudah terpengaruh pendapat negatif orang lain", "Kemampuan yang terbatas dalam programming"], correct: 2 },
+                { id: 4, text: "Pak Arif, guru produktif TKJ di SMKN 1 Brondong, selalu mengajarkan pentingnya karakter \"berani mengambil risiko\" bagi wirausahawan muda. Yang dimaksud dengan \"berani mengambil risiko\" dalam kewirausahaan adalah...", options: ["Nekat melakukan bisnis tanpa perhitungan yang matang", "Meminjam uang sebanyak-banyaknya untuk modal usaha", "Berani memulai usaha baru meski ada kemungkinan gagal, dengan perhitungan dan persiapan yang baik", "Meniru bisnis orang lain agar tidak rugi", "Hanya memulai bisnis yang sudah pasti untung 100%"], correct: 2 },
+                { id: 5, text: "Budi membuka jasa pembuatan website untuk UMKM. Dalam promosi, ia klaim \"website akan selesai dalam 3 hari\" padahal kenyataannya butuh waktu 2 minggu. Banyak klien yang kecewa karena janji tidak ditepati, meskipun hasil websitenya bagus. Reputasi usaha Budi mulai menurun. Karakter wirausaha yang TIDAK dimiliki Budi adalah...", options: ["Inovatif membuat website berkualitas", "Kreatif dalam desain website", "Jujur dalam berbisnis dan menepati janji", "Berani mengambil risiko bisnis", "Memiliki keterampilan teknis yang baik"], correct: 2 },
+                { id: 6, text: "Dalam pembelajaran kewirausahaan, guru menjelaskan bahwa kreativitas bukan hanya tentang seni atau desain, tetapi juga tentang cara berpikir dalam memecahkan masalah bisnis. Penerapan kreativitas dalam bisnis teknologi dapat berupa...", options: ["Selalu menggunakan cara yang sudah terbukti berhasil tanpa perubahan", "Menunggu orang lain membuat inovasi baru lalu menirunya", "Menciptakan solusi baru atau cara berbeda untuk memecahkan masalah pelanggan", "Fokus hanya pada satu produk tanpa variasi", "Mengikuti semua tren tanpa analisis kebutuhan pasar"], correct: 2 },
+                { id: 7, text: "Lia ingin membuka toko komputer online. Ia sudah riset pasar, punya supplier terpercaya, dan modal cukup. Namun ia khawatir \"bagaimana kalau tidak laku?\" dan \"bagaimana kalau rugi?\". Karena terlalu takut, akhirnya Lia membatalkan niatnya dan memilih menjadi karyawan di toko komputer orang lain dengan gaji pas-pasan. Karakter wirausaha yang belum dimiliki Lia adalah...", options: ["Kreatif dalam merencanakan bisnis", "Jujur dalam menjalankan usaha", "Rasa ingin tahu tentang peluang bisnis", "Berani mengambil risiko dalam berwirausaha", "Inovatif dalam mencari supplier"], correct: 3 },
+                { id: 8, text: "Di kelas PKK, guru menjelaskan perbedaan cara berpikir antara growth mindset dan fixed mindset saat menghadapi kegagalan dalam bisnis. Perbedaan respons terhadap kegagalan antara growth mindset dan fixed mindset adalah...", options: ["Growth mindset melihat kegagalan sebagai pembelajaran, fixed mindset melihat kegagalan sebagai bukti ketidakmampuan", "Growth mindset tidak pernah gagal, fixed mindset selalu gagal", "Growth mindset untuk orang pintar, fixed mindset untuk orang bodoh", "Keduanya sama-sama takut gagal dalam bisnis", "Growth mindset langsung menyerah, fixed mindset terus mencoba"], correct: 0 },
+                { id: 9, text: "Hasan, alumni TKJ SMKN 1 Brondong, sudah 4 kali mencoba berbagai bisnis teknologi namun gagal: warnet tutup, jual aksesoris komputer sepi, jasa instalasi jaringan tidak berkembang, dan rental PS bangkrut. Namun ia tidak menyerah. Di percobaan kelima, ia membuka kursus komputer untuk anak-anak dan berhasil dengan 30 siswa tetap. Hasan berkata, \"Setiap kegagalan mengajarkan saya sesuatu yang berharga.\" Karakter wirausaha yang paling menonjol dari Hasan adalah...", options: ["Jujur kepada diri sendiri", "Inovatif menciptakan produk baru", "Pantang menyerah dan terus berusaha", "Berani mengambil risiko besar", "Rasa ingin tahu yang tinggi"], correct: 2 },
+                { id: 10, text: "Siswa TKJ SMKN 1 Brondong belajar bahwa kreativitas adalah keterampilan yang bisa dilatih dan dikembangkan dalam kehidupan sehari-hari. Cara melatih kreativitas dalam kehidupan sehari-hari sebagai siswa TKJ adalah...", options: ["Selalu mengerjakan tugas dengan cara yang sama seperti contoh guru", "Menghindari hal-hal baru karena takut salah", "Mencoba berbagai cara berbeda untuk menyelesaikan masalah teknis", "Hanya fokus pada teori tanpa praktik", "Meniru pekerjaan teman tanpa modifikasi"], correct: 2 },
+                
+                // NUMERASI
+                { id: 11, text: "Kelas XII TKJ SMKN 1 Brondong mengadakan workshop kewirausahaan selama 6 hari. Materi yang diajarkan adalah: Hari 1: Pentingnya kreativitas (2 jam), Hari 2: Growth mindset vs Fixed mindset (3 jam), Hari 3: Karakter jujur dan berani mengambil risiko (2 jam), Hari 4: Karakter inovatif dan pantang menyerah (3 jam), Hari 5: Karakter rasa ingin tahu (2 jam), Hari 6: Praktik membuat business plan (4 jam). Berapa total jam pembelajaran tentang karakter wirausaha (hari 3, 4, dan 5)?", options: ["5 jam", "6 jam", "7 jam", "8 jam", "9 jam"], correct: 2 },
+                { id: 12, text: "Dalam diskusi kelompok, guru memberikan 6 pernyataan dan meminta siswa mengidentifikasi mana yang termasuk growth mindset: 1. \"Saya belum bisa, tapi saya akan terus belajar\", 2. \"Ini terlalu sulit untuk saya\", 3. \"Kesalahan membantu saya belajar\", 4. \"Saya tidak berbakat di bidang ini\", 5. \"Usaha saya akan membuat saya lebih baik\", 6. \"Kemampuan saya sudah mentok\". Berapa jumlah pernyataan yang menunjukkan growth mindset?", options: ["1 pernyataan", "2 pernyataan", "3 pernyataan", "4 pernyataan", "5 pernyataan"], correct: 2 },
+                { id: 13, text: "Fitri mengikuti kompetisi web design tingkat nasional selama 4 tahun berturut-turut dengan hasil: Tahun 1: Tidak lolos seleksi awal (skor 0), Tahun 2: Lolos seleksi, masuk 20 besar (skor 2), Tahun 3: Masuk 10 besar (skor 3), Tahun 4: Juara 3 nasional (skor 4). Jika kita beri nilai untuk setiap pencapaian (tidak lolos = 0, lolos = 1, 20 besar = 2, 10 besar = 3, juara 3 = 4), berapa total nilai pencapaian Fitri dalam 4 tahun?", options: ["7", "8", "9", "10", "11"], correct: 2 },
+                { id: 14, text: "Guru PKK memberikan tugas membuat inovasi produk teknologi. Dari 40 siswa TKJ, hasil kreativitas mereka dinilai: 8 siswa sangat inovatif, 16 siswa cukup kreatif, 10 siswa kurang kreatif, 6 siswa tidak mengumpulkan. Berapa persen siswa yang menunjukkan kreativitas baik (sangat inovatif + cukup kreatif)?", options: ["40%", "50%", "60%", "70%", "80%"], correct: 2 },
+                { id: 15, text: "Andi merencanakan strategi bisnis instalasi WiFi dengan target bertahap: Fase 1 (bulan 1-3): Fokus ke 15 rumah warga di dekat sekolah, Fase 2 (bulan 4-6): Tambah 10 warung dan toko kecil, Fase 3 (bulan 7-9): Tambah 12 kantor dan klinik. Karakter apa yang ditunjukkan dengan perencanaan bertahap ini, dan berapa total target pelanggan dalam 9 bulan?", options: ["Pantang menyerah, 30 pelanggan", "Jujur, 35 pelanggan", "Inovatif dan terencana, 37 pelanggan", "Berani mengambil risiko, 40 pelanggan", "Rasa ingin tahu, 45 pelanggan"], correct: 2 },
+                { id: 16, text: "Dini mencoba membuat game edukasi untuk anak SD. Ia mengalami kegagalan dan terus belajar: Percobaan 1-3: Gagal (game tidak menarik), Percobaan 4-6: Gagal (terlalu sulit untuk anak), Percobaan 7-8: Gagal (terlalu mudah, anak bosan), Percobaan 9: Berhasil (balance antara fun dan edukatif). Sikap Dini menunjukkan karakter apa, dan berapa total percobaan yang ia lakukan?", options: ["Jujur, 7 kali", "Inovatif, 8 kali", "Berani mengambil risiko, 8 kali", "Pantang menyerah, 9 kali", "Rasa ingin tahu, 10 kali"], correct: 3 },
+                { id: 17, text: "Dalam penilaian project kewirausahaan, guru memberikan bobot untuk 5 karakter wirausaha: Jujur (bobot 3), Berani mengambil risiko (bobot 4), Pantang menyerah (bobot 5), Inovatif (bobot 5), Rasa ingin tahu (bobot 3). Toni dalam project-nya menunjukkan 3 karakter: jujur, pantang menyerah, dan inovatif. Berapa total skor Toni?", options: ["10", "11", "12", "13", "15"], correct: 3 },
+                { id: 18, text: "Program pengembangan mindset wirausaha di SMKN 1 Brondong berlangsung 12 bulan. Fokus pembelajaran setiap kuartal: Kuartal 1 (3 bulan): Membangun growth mindset, Kuartal 2 (3 bulan): Melatih kreativitas dan inovasi, Kuartal 3 (3 bulan): Mengembangkan karakter wirausaha, Kuartal 4 (3 bulan): Praktik membuat dan menjalankan bisnis. Jika seorang siswa ingin fokus mempelajari tentang growth mindset dan kreativitas, berapa bulan waktu yang dialokasikan untuk kedua topik tersebut?", options: ["3 bulan", "4 bulan", "5 bulan", "6 bulan", "9 bulan"], correct: 3 },
+                { id: 19, text: "Dalam survei tentang pola pikir di kelas XII TKJ (36 siswa), hasilnya: 27 siswa setuju bahwa \"kemampuan bisa berkembang dengan usaha keras\", 9 siswa percaya bahwa \"kemampuan sudah ditentukan sejak lahir\". Berapa persentase siswa yang memiliki growth mindset?", options: ["25%", "50%", "65%", "75%", "85%"], correct: 3 },
+                { id: 20, text: "Riko melatih kreativitasnya dengan mengembangkan ide bisnis teknologi secara bertahap: Tahap 1: Brainstorming 8 ide bisnis, Tahap 2: Seleksi menjadi 5 ide potensial, Tahap 3: Riset mendalam untuk 3 ide terbaik, Tahap 4: Prototype untuk 2 ide teratas, Tahap 5: Launching 1 ide terbaik. Dari proses kreatif Riko, berapa total ide yang ia kumpulkan di awal, dan berapa ide yang akhirnya dijalankan?", options: ["Kumpulkan 5 ide, jalankan 1 ide", "Kumpulkan 6 ide, jalankan 2 ide", "Kumpulkan 8 ide, jalankan 1 ide", "Kumpulkan 8 ide, jalankan 2 ide", "Kumpulkan 10 ide, jalankan 1 ide"], correct: 2 }
+            ],
+            C: [
+                { id: 1, text: "Sebuah SMK baru mengadakan praktikum wireless networking. Standar Wi-Fi yang mampu beroperasi di kedua frekuensi 2.4 GHz dan 5 GHz secara bersamaan dan menawarkan efisiensi terbaik adalah...", options: ["802.11a", "802.11b", "802.11g", "802.11ac", "802.11ax"], correct: 4 },
+                { id: 2, text: "Seorang teknisi memasang kabel Fiber Optic. Alat untuk memotong kabel fiber agar rata sebelum disambung adalah...", options: ["Crimping Tool", "Tang Potong", "Cleaver", "Stripper", "Fusion Splicer"], correct: 2 },
+                { id: 3, text: "IP Address 192.168.10.1 dengan subnet mask 255.255.255.0 termasuk dalam kelas...", options: ["Kelas A", "Kelas B", "Kelas C", "Kelas D", "Kelas E"], correct: 2 },
+                { id: 4, text: "Protokol yang digunakan secara default untuk mengirim email antar server adalah...", options: ["POP3", "IMAP", "SMTP", "HTTP", "FTP"], correct: 2 },
+                { id: 5, text: "Perangkat jaringan yang berfungsi memperkuat sinyal nirkabel dari Access Point utama ke area yang lebih jauh disebut...", options: ["Switch", "Hub", "Repeater / Range Extender", "Modem", "NIC"], correct: 2 },
+                { id: 6, text: "Perintah CLI dasar yang digunakan untuk menguji konektivitas antara dua perangkat jaringan adalah...", options: ["ipconfig", "ifconfig", "ping", "tracert", "netstat"], correct: 2 },
+                { id: 7, text: "Keuntungan utama menggunakan kabel Fiber Optic dibandingkan kabel tembaga (Coaxial/UTP) untuk jarak jauh adalah...", options: ["Harga lebih murah", "Instalasi lebih mudah", "Tahan terhadap interferensi elektromagnetik (EMI)", "Tidak memerlukan alat khusus", "Lebih fleksibel"], correct: 2 },
+                { id: 8, text: "Layanan server yang berfungsi menerjemahkan nama domain (seperti google.com) menjadi alamat IP adalah...", options: ["DHCP", "Web Server", "DNS", "FTP", "Proxy"], correct: 2 },
+                { id: 9, text: "Urutan warna kabel UTP standar T568B dari kiri ke kanan (pin 1-8) adalah...", options: ["Putih Hijau, Hijau...", "Putih Orange, Orange, Putih Hijau, Biru, Putih Biru, Hijau, Putih Coklat, Coklat", "Putih Coklat, Coklat...", "Putih Biru, Biru...", "Orange, Putih Orange..."], correct: 1 },
+                { id: 10, text: "Topologi jaringan di mana setiap node terhubung langsung ke satu perangkat pusat (hub/switch) disebut...", options: ["Bus", "Ring", "Mesh", "Star", "Tree"], correct: 3 },
+                { id: 11, text: "Kabel UTP kategori 5 (Cat5) memiliki panjang maksimum standar 100 meter untuk transmisi data yang optimal.", options: ["TRUE", "FALSE"], correct: 0 },
+                { id: 12, text: "Alamat IP 192.168.1.1 adalah contoh dari alamat IP Kelas A.", options: ["TRUE", "FALSE"], correct: 1 },
+                { id: 13, text: "Fiber optik mentransmisikan data menggunakan sinyal cahaya, bukan sinyal listrik.", options: ["TRUE", "FALSE"], correct: 0 },
+                { id: 14, text: "Switch bekerja pada Layer 1 (Physical) dalam model OSI.", options: ["TRUE", "FALSE"], correct: 1 },
+                { id: 15, text: "Fungsi utama DNS adalah mengubah alamat IP menjadi MAC Address.", options: ["TRUE", "FALSE"], correct: 1 },
+                { id: 16, text: "Bluetooth dan Wi-Fi yang beroperasi pada frekuensi 2.4 GHz berpotensi saling mengganggu (interferensi).", options: ["TRUE", "FALSE"], correct: 0 },
+                { id: 17, text: "Kabel crossover dan kabel straight memiliki susunan pin yang sama di kedua ujungnya.", options: ["TRUE", "FALSE"], correct: 1 },
+                { id: 18, text: "WEP adalah standar keamanan wireless yang paling aman dan masih direkomendasikan saat ini.", options: ["TRUE", "FALSE"], correct: 1 },
+                { id: 19, text: "Switch Layer 3 mampu menjalankan fungsi routing yang biasanya dilakukan oleh router.", options: ["TRUE", "FALSE"], correct: 0 },
+                { id: 20, text: "Frekuensi 5 GHz menawarkan kecepatan transfer data yang lebih tinggi dibandingkan 2.4 GHz.", options: ["TRUE", "FALSE"], correct: 0 }
+            ]
+        };
+
+        // --- STATE ---
+        let currentStudent = {};
+        let examTimer = null;
+        let timeLeft = 3600; 
+        let violations = 0;
+        let violationLogs = []; 
+        let userAnswers = {};
+        let dashboardData = [];
+        let currentFilteredData = [];
+        let currentQuestionList = [];
+        let currentQuestionIndex = 0;
+        let isWarningActive = false; 
+
+        window.switchLoginTab = function(type) {
+            const btnStudent = document.getElementById('tab-student');
+            const btnTeacher = document.getElementById('tab-teacher');
+            const formStudent = document.getElementById('form-student');
+            const formTeacher = document.getElementById('form-teacher');
+
+            if (type === 'student') {
+                btnStudent.className = "flex-1 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 transition-colors";
+                btnTeacher.className = "flex-1 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors";
+                formStudent.classList.remove('hidden-section');
+                formTeacher.classList.add('hidden-section');
+            } else {
+                btnStudent.className = "flex-1 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors";
+                btnTeacher.className = "flex-1 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 transition-colors";
+                formStudent.classList.add('hidden-section');
+                formTeacher.classList.remove('hidden-section');
+            }
+        };
+
+        window.selectPacket = function(pkt) {
+            document.querySelectorAll('.pkt-btn').forEach(btn => {
+                btn.className = "pkt-btn py-2 border rounded-lg font-bold bg-white text-gray-600 hover:bg-gray-50";
+            });
+            const selectedBtn = document.getElementById('pkt-' + pkt);
+            if(selectedBtn) {
+                selectedBtn.className = "pkt-btn py-2 border rounded-lg font-bold bg-blue-600 text-white border-blue-600";
+                document.getElementById('selected-packet').value = pkt;
+            }
+        };
+
+        // --- DASHBOARD UI LOGIC ---
+        window.switchDashTab = function(tab) {
+            const btnNilai = document.getElementById('tab-dash-nilai');
+            const btnSoal = document.getElementById('tab-dash-soal');
+            const pnlNilai = document.getElementById('panel-nilai');
+            const pnlSoal = document.getElementById('panel-soal');
+
+            if (tab === 'nilai') {
+                btnNilai.className = "pb-3 border-b-2 border-blue-600 font-bold text-blue-600 px-4";
+                btnSoal.className = "pb-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 font-bold px-4";
+                pnlNilai.classList.remove('hidden-section');
+                pnlSoal.classList.add('hidden-section');
+            } else {
+                btnNilai.className = "pb-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 font-bold px-4";
+                btnSoal.className = "pb-3 border-b-2 border-blue-600 font-bold text-blue-600 px-4";
+                pnlNilai.classList.add('hidden-section');
+                pnlSoal.classList.remove('hidden-section');
+                window.filterQuestionBank(); // Refresh bank list
+            }
+        };
+        
+        // --- CHEAT ALERT LOGIC ---
+        window.triggerCheatAlert = function(data) {
+            if (document.getElementById('section-dashboard').classList.contains('hidden-section')) return;
+
+            const modal = document.getElementById('modal-cheat-alert');
+            const nameEl = document.getElementById('cheat-student-name');
+            const msgEl = document.getElementById('cheat-message');
+            const statusEl = document.getElementById('cheat-status');
+            const countEl = document.getElementById('cheat-count');
+
+            nameEl.innerText = data.studentName + " (" + data.className + ")";
+            statusEl.innerText = data.status;
+            countEl.innerText = data.violations + "x";
+
+            if (data.status.includes('DISKUALIFIKASI')) {
+                 msgEl.innerText = "SISWA INI TELAH DIDISKUALIFIKASI OLEH SISTEM!";
+            } else {
+                 msgEl.innerText = "Terdeteksi melakukan kecurangan (Pindah Tab/Split Screen)!";
+            }
+
+            modal.classList.remove('hidden');
+            
+            try {
+                const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+                audio.volume = 0.5;
+                audio.play().catch(() => {}); 
+            } catch(e) {}
+        };
+
+        window.closeCheatAlert = function() {
+            document.getElementById('modal-cheat-alert').classList.add('hidden');
+        };
+        
+        window.showViolationDetails = (id) => {
+            const item = dashboardData.find(x => x.id === id);
+            if (!item) return;
+
+            document.getElementById('violation-student-name').innerText = item.studentName;
+            const list = document.getElementById('violation-list');
+            list.innerHTML = '';
+
+            if (!item.violationLogs || item.violationLogs.length === 0) {
+                list.innerHTML = '<p class="text-xs text-gray-400 italic text-center py-4">Tidak ada log detail tercatat.<br> (Sistem versi lama atau deteksi manual).</p>';
+            } else {
+                item.violationLogs.forEach((log) => {
+                    const time = new Date(log.time).toLocaleTimeString('id-ID');
+                    list.innerHTML += `
+                        <div class="text-xs border-b last:border-0 pb-2 mb-2 bg-white p-2 rounded shadow-sm">
+                            <span class="font-bold text-red-600 bg-red-50 px-1 rounded border border-red-100 mr-1">[${time}]</span> 
+                            <span class="text-gray-700 font-medium">${log.message}</span>
+                        </div>
+                    `;
+                });
+            }
+            document.getElementById('modal-violation-details').classList.remove('hidden');
+        };
+
+        window.filterQuestionBank = function() {
+            const filter = document.getElementById('filter-bank-packet').value;
+            const tbody = document.getElementById('bank-soal-body');
+            tbody.innerHTML = '';
+
+            const filtered = window.allQuestionsDB.filter(q => filter === 'all' || q.packet === filter);
+            
+            if (filtered.length === 0) {
+                if (window.allQuestionsDB.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="3" class="px-6 py-12 text-center">
+                                <div class="flex flex-col items-center gap-3">
+                                    <div class="p-3 bg-yellow-100 text-yellow-600 rounded-full"><i data-lucide="database" class="w-8 h-8"></i></div>
+                                    <h3 class="text-lg font-bold text-gray-700">Database Kosong</h3>
+                                    <p class="text-gray-500 max-w-md mx-auto">
+                                        Saat ini siswa mengerjakan soal <b>Bawaan (Hardcoded)</b>. 
+                                        Agar bisa diedit/hapus, harap masukkan ke database.
+                                    </p>
+                                    <button onclick="window.seedDatabase()" class="mt-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold shadow-md flex items-center gap-2">
+                                        <i data-lucide="upload-cloud" class="w-4 h-4"></i> Masukkan Soal Bawaan ke Database Sekarang
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>`;
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="3" class="px-6 py-12 text-center text-gray-400">Tidak ada soal di paket ini.</td></tr>';
+                }
+                if(typeof lucide !== 'undefined') lucide.createIcons();
+                return;
+            }
+
+            filtered.sort((a,b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+            filtered.forEach(q => {
+                const pktColor = q.packet === 'A' ? 'bg-blue-100 text-blue-700' : q.packet === 'B' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700';
+                
+                const row = `
+                    <tr class="hover:bg-slate-50 border-b last:border-0 group">
+                        <td class="px-4 py-3"><span class="px-2 py-1 rounded text-xs font-bold ${pktColor}">${q.packet}</span></td>
+                        <td class="px-4 py-3">
+                            <p class="text-sm text-gray-800 line-clamp-2 font-medium">${q.text}</p>
+                            <p class="text-xs text-gray-400 mt-1">${q.options.length} Opsi • Kunci: Indeks ${q.correct}</p>
+                        </td>
+                        <td class="px-4 py-3 text-center">
+                            <div class="flex justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button onclick="window.openQuestionModal('${q.id}')" class="p-2 bg-blue-50 text-blue-600 rounded hover:bg-blue-100"><i data-lucide="edit-2" class="w-4 h-4"></i></button>
+                                <button onclick="window.deleteQuestion('${q.id}')" class="p-2 bg-red-50 text-red-600 rounded hover:bg-red-100"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                tbody.innerHTML += row;
+            });
+            if(typeof lucide !== 'undefined') lucide.createIcons();
+        };
+
+        // --- STUDENT LOGIN (UPDATED WITH OFFLINE SUPPORT) ---
+        window.handleStudentLogin = async function(e) {
+            e.preventDefault();
+            try {
+                const name = document.getElementById('student-name').value.trim();
+                const cls = document.getElementById('student-class').value;
+                const pkt = document.getElementById('selected-packet').value;
+                const tokenInput = document.getElementById('student-token').value.trim().toUpperCase();
+
+                if (!name || !cls) {
+                    alert("Mohon lengkapi Nama dan Kelas!");
+                    return;
+                }
+
+                if (tokenInput !== window.currentExamToken) {
+                    alert("TOKEN SALAH! Silakan minta token yang benar kepada pengawas.");
+                    return;
+                }
+
+                // Local check only for current session
+                const localSession = localStorage.getItem('ukktkj_session_done');
+                if (localSession) {
+                    const sessionData = JSON.parse(localSession);
+                    const lastTime = new Date(sessionData.date).getTime();
+                    const now = Date.now();
+                    const diffHours = (now - lastTime) / (1000 * 60 * 60);
+
+                    if (diffHours < 12) {
+                        const remaining = Math.ceil(12 - diffHours);
+                        alert(`⛔ AKSES DITOLAK (PERANGKAT TERKUNCI)\n\nPerangkat ini baru saja digunakan oleh: "${sessionData.name}".\n\nSistem membatasi penggunaan perangkat yang sama (Cooldown 12 Jam).\nSilakan coba lagi dalam ${remaining} jam.`);
+                        return; 
+                    } else {
+                        localStorage.removeItem('ukktkj_session_done');
+                    }
+                }
+
+                const submitBtn = e.target.querySelector('button');
+                const oldText = submitBtn.innerText;
+                submitBtn.disabled = true;
+                submitBtn.innerText = "Memeriksa Perangkat...";
+
+                // --- OFFLINE/ONLINE BRANCHING ---
+                let isDuplicateName = false;
+                let isDeviceBlocked = false;
+                let blockedByWho = "";
+                let existingActiveDocId = null; 
+
+                // Only check database if online and ready
+                if (window.isFirebaseReady && window.db) {
+                    try {
+                        const currentFp = getDeviceFingerprint(); 
+                        const qSnap = await getDocs(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results'));
+                        const nowServer = Date.now();
+
+                        qSnap.forEach(doc => {
+                            const d = doc.data();
+                            const recordTime = d.timestamp;
+                            const recordAgeHours = (nowServer - recordTime) / (1000 * 60 * 60);
+
+                            if (recordAgeHours < 12) {
+                                if (d.studentName.toLowerCase() === name.toLowerCase() && d.className === cls) {
+                                    if (d.status.includes('SELESAI') || d.status.includes('DISKUALIFIKASI')) {
+                                        isDuplicateName = true; 
+                                    } else {
+                                        existingActiveDocId = doc.id;
+                                        window.examStartTime = d.timestamp;
+                                    }
+                                }
+                                if (d.deviceFingerprint === currentFp && (d.status.includes('SELESAI') || d.status.includes('DISKUALIFIKASI'))) {
+                                    if (d.studentName.toLowerCase() !== name.toLowerCase()) {
+                                        isDeviceBlocked = true;
+                                        blockedByWho = d.studentName;
+                                    }
+                                }
+                            }
+                        });
+                    } catch (dbErr) {
+                        console.warn("DB Check failed, proceeding in offline mode", dbErr);
+                        // Fallback implies we skip server-side checks
+                    }
+                }
+
+                if (isDuplicateName) {
+                    alert(`⛔ AKSES DITOLAK\n\nSiswa atas nama "${name}" tercatat SUDAH MENYELESAIKAN ujian atau DIDISKUALIFIKASI dalam 12 jam terakhir.\n\nTidak diizinkan login ulang.`);
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = oldText;
+                    return;
+                }
+
+                if (isDeviceBlocked) {
+                    alert(`⛔ PERANGKAT DIBLOKIR (SISTEM ANTI-CHEAT)\n\nSistem mendeteksi HP/Perangkat ini baru saja digunakan oleh siswa: "${blockedByWho}".\n\nMohon gunakan perangkat sendiri. Perangkat ini terkunci selama 12 jam.`);
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = oldText;
+                    return;
+                }
+
+                // LOAD QUESTIONS (DB or Fallback)
+                let dbQuestions = window.allQuestionsDB.filter(q => q.packet === pkt);
+                
+                if (dbQuestions.length === 0) {
+                    if(questionBank[pkt]) {
+                        dbQuestions = [...questionBank[pkt]];
+                    } else {
+                        throw new Error("Paket soal tidak ditemukan di Database maupun Bawaan!");
+                    }
+                }
+
+                currentStudent = { name, cls, pkt };
+                
+                document.getElementById('header-name').innerText = name;
+                document.getElementById('header-detail').innerText = `${cls} • Paket ${pkt}`;
+                
+                currentQuestionList = [...dbQuestions];
+                shuffleArray(currentQuestionList);
+                
+                violationLogs = [];
+                violations = 0;
+
+                // SAVE SESSION START (Only if online)
+                if (window.isFirebaseReady && window.db) {
+                    if (existingActiveDocId) {
+                        window.currentExamDocId = existingActiveDocId;
+                        console.log("Resuming session:", existingActiveDocId);
+                        await updateDoc(doc(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results', existingActiveDocId), {
+                            status: "MELANJUTKAN (Re-Login)",
+                            packetType: pkt,
+                            deviceFingerprint: getDeviceFingerprint()
+                        });
+                    } else {
+                        const startData = {
+                            timestamp: Date.now(),
+                            studentName: name,
+                            className: cls,
+                            packetType: pkt,
+                            score: '-',
+                            status: "SEDANG MENGERJAKAN",
+                            violations: 0,
+                            violationLogs: [] 
+                        };
+                        window.examStartTime = startData.timestamp; 
+                        await window.saveExamStart(startData); 
+                    }
+                } else {
+                    // Offline Start Time
+                     window.examStartTime = Date.now();
+                }
+
+                submitBtn.disabled = false;
+                submitBtn.innerText = oldText;
+
+                currentQuestionIndex = 0;
+                renderQuestion();
+                renderSidebarButtons();
+
+                try {
+                    const elem = document.documentElement;
+                    if (elem.requestFullscreen) elem.requestFullscreen().catch(err => console.log(err));
+                    else if (elem.webkitRequestFullscreen) elem.webkitRequestFullscreen();
+                    else if (elem.msRequestFullscreen) elem.msRequestFullscreen();
+                } catch(err){
+                    console.log("Fullscreen aborted or not supported", err);
+                }
+
+                document.getElementById('section-login').classList.add('hidden-section');
+                document.getElementById('section-exam').classList.remove('hidden-section');
+                
+                startExamLogic();
+            } catch(error) {
+                console.error(error);
+                alert("Gagal memulai ujian: " + error.message);
+                const submitBtn = e.target.querySelector('button');
+                if(submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "MULAI UJIAN";
+                }
+            }
+        };
+
+        window.handleTeacherLogin = function(e) {
+            e.preventDefault();
+            const u = document.getElementById('teacher-user').value;
+            const p = document.getElementById('teacher-pass').value;
+
+            if (u === 'authar' && p === 'Sedayu@123') {
+                window.currentUserRole = 'teacher';
+                if(window.setupRealtimeListener) window.setupRealtimeListener();
+                
+                document.getElementById('section-login').classList.add('hidden-section');
+                document.getElementById('section-dashboard').classList.remove('hidden-section');
+                
+                const teacherInput = document.getElementById('teacher-token-input');
+                if(teacherInput) teacherInput.value = window.currentExamToken;
+            } else {
+                alert("Username atau Password Salah");
+            }
+        };
+
+        window.changeQuestion = function(delta) {
+            const newIndex = currentQuestionIndex + delta;
+            if (newIndex >= 0 && newIndex < currentQuestionList.length) {
+                currentQuestionIndex = newIndex;
+                renderQuestion();
+            }
+        };
+
+        window.toggleSidebar = function() {
+            const sidebar = document.getElementById('exam-sidebar');
+            const overlay = document.getElementById('sidebar-overlay');
+            if (sidebar.classList.contains('sidebar-closed')) {
+                sidebar.classList.remove('sidebar-closed');
+                sidebar.classList.add('sidebar-open');
+                overlay.classList.remove('hidden');
+            } else {
+                sidebar.classList.remove('sidebar-open');
+                sidebar.classList.add('sidebar-closed');
+                overlay.classList.add('hidden');
+            }
+        };
+
+        // --- CONFIRM FINISH EXAM WITH ANTI-SUBMIT CHECK ---
+        window.confirmFinishExam = function() {
+            // NEW: Anti-Submit Check
+            if (window.currentMinExamDuration > 0 && window.examStartTime) {
+                const elapsedMs = Date.now() - window.examStartTime;
+                const elapsedMin = elapsedMs / 60000;
+                
+                if (elapsedMin < window.currentMinExamDuration) {
+                    const remaining = Math.ceil(window.currentMinExamDuration - elapsedMin);
+                    alert(`⛔ BELUM BISA SUBMIT\n\nAnda baru bisa mengumpulkan jawaban setelah ${window.currentMinExamDuration} menit.\n\nSisa waktu tunggu: ${remaining} menit lagi.\nSilakan periksa kembali jawaban Anda.`);
+                    return;
+                }
+            }
+
+            const answeredCount = Object.keys(userAnswers).length;
+            const total = currentQuestionList.length;
+            
+            let msg = "Apakah Anda yakin ingin menyelesaikan ujian?";
+            if (answeredCount < total) {
+                msg = `PERHATIAN: Masih ada ${total - answeredCount} soal yang belum dijawab! Yakin mau selesai?`;
+            }
+            
+            document.getElementById('modal-desc').innerText = msg;
+            
+            const modal = document.getElementById('modal-confirm');
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                modal.classList.add('show');
+            }, 10);
+        };
+
+        window.closeModal = function() {
+            const modal = document.getElementById('modal-confirm');
+            modal.classList.remove('show');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 200);
+        };
+
+        window.finalFinish = function() {
+            window.closeModal();
+            finishExam();
+        };
+
+        window.logout = function() {
+            location.reload();
+        };
+        
+        window.filterDashboard = function() {
+            filterDashboardInternal();
+        };
+
+        window.exportToCSV = function() {
+            exportToCSVInternal();
+        };
+
+        window.toggleReview = function() {
+            const reviewContainer = document.getElementById('review-container');
+            const btn = document.getElementById('btn-review');
+            
+            if(reviewContainer.classList.contains('hidden')) {
+                reviewContainer.classList.remove('hidden');
+                btn.innerHTML = `<i data-lucide="eye-off" class="w-5 h-5"></i> Tutup Pembahasan`;
+                setTimeout(() => {
+                    reviewContainer.scrollIntoView({ behavior: 'smooth' });
+                }, 100);
+            } else {
+                reviewContainer.classList.add('hidden');
+                btn.innerHTML = `<i data-lucide="book-open" class="w-5 h-5"></i> Lihat Pembahasan`;
+                document.getElementById('section-result').scrollTo({ top: 0, behavior: 'smooth' });
+            }
+            if(typeof lucide !== 'undefined') lucide.createIcons();
+        }
+
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+        }
+        
+        function renderQuestion() {
+            if(!currentQuestionList || !currentQuestionList[currentQuestionIndex]) return;
+            const q = currentQuestionList[currentQuestionIndex];
+            const container = document.getElementById('question-area');
+            const total = currentQuestionList.length;
+
+            let optionsHTML = '';
+            q.options.forEach((opt, optIdx) => {
+                const isSelected = userAnswers[q.id] === optIdx;
+                const activeClass = isSelected 
+                    ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500" 
+                    : "border-gray-200 hover:bg-gray-50";
+                
+                const indicatorClass = isSelected
+                    ? "w-4 h-4 rounded-full border border-blue-500 bg-blue-600 flex items-center justify-center mr-3 text-white"
+                    : "w-4 h-4 rounded-full border border-gray-300 flex items-center justify-center mr-3";
+
+                const indicatorContent = isSelected 
+                    ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4"><polyline points="20 6 9 17 4 12"></polyline></svg>` 
+                    : "";
+
+                optionsHTML += `
+                    <label class="flex items-center p-4 rounded-lg border cursor-pointer transition-all mb-3 ${activeClass}" onclick="saveAnswer('${q.id}', ${optIdx}, this)">
+                        <div class="${indicatorClass} radio-indicator">${indicatorContent}</div>
+                        <span class="text-gray-700 text-base md:text-lg">${opt}</span>
+                    </label>
+                `;
+            });
+
+            const html = `
+                <div class="bg-white rounded-xl shadow-sm border p-6 md:p-8 animate-fade-in">
+                    <div class="flex flex-col gap-4">
+                        <div class="flex justify-between items-start border-b pb-4 mb-2">
+                            <span class="bg-slate-100 text-slate-600 px-3 py-1 rounded text-sm font-bold">Soal No. ${currentQuestionIndex + 1}</span>
+                            <span class="text-xs text-gray-400">Dari ${total} soal</span>
+                        </div>
+                        
+                        <p class="text-lg md:text-xl text-gray-800 mb-4 font-medium leading-relaxed">${q.text}</p>
+                        
+                        <div class="space-y-1 option-group" id="opts-${q.id}">
+                            ${optionsHTML}
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            container.innerHTML = html;
+            updateNavButtons();
+            renderSidebarButtons();
+        }
+
+        function updateNavButtons() {
+            const btnPrev = document.getElementById('btn-prev');
+            const btnNext = document.getElementById('btn-next');
+            const btnFinish = document.getElementById('btn-finish-main');
+
+            if(btnPrev) btnPrev.disabled = currentQuestionIndex === 0;
+            
+            if (currentQuestionIndex === currentQuestionList.length - 1) {
+                if(btnNext) btnNext.classList.add('hidden');
+                if(btnFinish) btnFinish.classList.remove('hidden');
+            } else {
+                if(btnNext) btnNext.classList.remove('hidden');
+                if(btnFinish) btnFinish.classList.add('hidden');
+            }
+        }
+
+        function jumpToQuestion(idx) {
+            currentQuestionIndex = idx;
+            renderQuestion();
+            if (window.innerWidth < 768) {
+                window.toggleSidebar();
+            }
+        }
+
+        window.saveAnswer = function(qId, optIdx, element) {
+            userAnswers[qId] = optIdx;
+            renderQuestion();
+        };
+
+        function renderSidebarButtons() {
+            const grid = document.getElementById('question-grid');
+            if(!grid) return;
+            grid.innerHTML = '';
+            
+            currentQuestionList.forEach((q, idx) => {
+                const isAnswered = userAnswers[q.id] !== undefined;
+                const isActive = idx === currentQuestionIndex;
+                
+                let btnClass = "h-10 w-full rounded font-bold text-sm flex items-center justify-center transition-colors ";
+                
+                if (isActive) {
+                    btnClass += "border-2 border-blue-600 bg-white text-blue-600";
+                } else if (isAnswered) {
+                    btnClass += "bg-green-500 text-white hover:bg-green-600";
+                } else {
+                    btnClass += "bg-slate-200 text-slate-600 hover:bg-slate-300";
+                }
+
+                const btn = document.createElement('button');
+                btn.className = btnClass;
+                btn.innerText = idx + 1;
+                btn.onclick = () => jumpToQuestion(idx);
+                grid.appendChild(btn);
+            });
+        }
+
+        function startExamLogic() {
+            timeLeft = (window.currentExamDuration || 60) * 60;
+            
+            examTimer = setInterval(() => {
+                timeLeft--;
+                const m = Math.floor(timeLeft / 60).toString().padStart(2, '0');
+                const s = (timeLeft % 60).toString().padStart(2, '0');
+                const timerDisplay = document.getElementById('timer-display');
+                if(timerDisplay) timerDisplay.innerText = `${m}:${s}`;
+                
+                if (timeLeft < 300) { 
+                    const timerBox = document.getElementById('timer-box');
+                    if(timerBox) timerBox.className = "flex items-center gap-2 px-4 py-2 rounded-lg font-mono font-bold text-lg bg-red-100 text-red-600";
+                }
+
+                if (timeLeft <= 0) {
+                    finishExam();
+                }
+            }, 1000);
+
+            document.addEventListener("visibilitychange", handleVisibility);
+            window.addEventListener("blur", handleBlur); 
+            document.addEventListener("contextmenu", e => e.preventDefault());
+
+            history.pushState(null, null, location.href);
+            window.onpopstate = function () {
+                history.go(1);
+            };
+            window.onbeforeunload = function() {
+                return "PERINGATAN: Ujian sedang berlangsung.";
+            };
+        }
+
+        function handleVisibility() {
+            if (document.hidden) {
+                registerViolation("Anda meninggalkan tab ujian!");
+            }
+        }
+
+        function handleBlur() {
+            if (!document.hidden) {
+                registerViolation("Terdeteksi interaksi di luar layar ujian (Aplikasi Mengambang/Notifikasi)!");
+            }
+        }
+        
+        function playAlarm() {
+            const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+            audio.play().catch(e => console.log("Audio blocked", e));
+        }
+
+        function registerViolation(message) {
+            if (isWarningActive) return; 
+            if (violations >= 3) return; 
+
+            isWarningActive = true;
+            violations++;
+            
+            playAlarm();
+
+            violationLogs.push({ time: Date.now(), message: message });
+
+            if (window.isFirebaseReady && window.currentExamDocId && window.db) {
+                const statusUpdate = violations >= 3 ? "DISKUALIFIKASI (Kecurangan)" : "SEDANG MENGERJAKAN";
+                updateDoc(doc(window.db, 'artifacts', window.appId, 'public', 'data', 'exam_results', window.currentExamDocId), {
+                    violations: violations,
+                    violationLogs: violationLogs,
+                    status: statusUpdate
+                }).catch(console.error);
+            }
+
+            setTimeout(() => {
+                alert(`PERINGATAN KERAS! (${violations}/3)\n\n${message}\n\nSetiap kecurangan akan terdeteksi di sistem.\nIngat kejujuran adalah hal terpenting.`);
+                
+                isWarningActive = false;
+                if (violations >= 3) {
+                    finishExam(true);
+                }
+            }, 200);
+        }
+
+        function finishExam(forced = false) {
+            clearInterval(examTimer);
+            document.removeEventListener("visibilitychange", handleVisibility);
+            window.removeEventListener("blur", handleBlur);
+            window.onpopstate = null;
+            window.onbeforeunload = null;
+
+            let correctCount = 0;
+            currentQuestionList.forEach(q => {
+                if (typeof q.correct === 'undefined') return;
+                if (userAnswers[q.id] === q.correct) correctCount++;
+            });
+            const score = Math.round((correctCount / currentQuestionList.length) * 100);
+
+            const resultData = {
+                timestamp: Date.now(),
+                studentName: currentStudent.name,
+                className: currentStudent.cls,
+                packetType: currentStudent.pkt,
+                score: score,
+                status: forced ? "DISKUALIFIKASI (Kecurangan)" : "SELESAI",
+                violations: forced ? 3 : violations,
+                violationLogs: violationLogs
+            };
+
+            if(window.saveExamResult) window.saveExamResult(resultData);
+
+            localStorage.setItem('ukktkj_session_done', JSON.stringify({
+                name: currentStudent.name,
+                date: new Date().toISOString()
+            }));
+
+            const resultIcon = document.getElementById('result-icon-container');
+            const resultTitle = document.getElementById('result-title');
+            const resultMsg = document.getElementById('result-message');
+            const scoreEl = document.getElementById('final-score-display');
+            const motivationalEl = document.getElementById('motivational-message');
+            const btnReview = document.getElementById('btn-review');
+            
+            scoreEl.innerText = score;
+
+            if (forced) {
+                playAlarm();
+                
+                resultIcon.className = "w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse";
+                resultIcon.innerHTML = `<i data-lucide="alert-octagon" class="w-10 h-10"></i>`;
+                
+                resultTitle.innerText = "ANDA DIDISKUALIFIKASI";
+                resultTitle.className = "text-2xl font-bold text-red-600 mb-2";
+                
+                resultMsg.innerText = "Setiap kecurangan akan terdeteksi di sistem. Ingat, kejujuran adalah hal terpenting.";
+                resultMsg.className = "text-red-500 mb-6 font-bold text-lg";
+                
+                scoreEl.className = "text-5xl font-extrabold text-red-600";
+                
+                motivationalEl.innerHTML = `Sistem mencatat 3x pelanggaran. Kejujuran adalah hal terpenting dalam ujian ini.`;
+                motivationalEl.className = "mb-6 px-4 py-3 rounded-lg font-bold text-sm md:text-base border-l-4 bg-red-100 text-red-800 border-red-500";
+                
+                btnReview.style.display = 'none';
+
+            } else {
+                resultIcon.className = "w-20 h-20 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6";
+                resultIcon.innerHTML = `<i data-lucide="check-circle" class="w-10 h-10"></i>`;
+                
+                resultTitle.innerText = "Ujian Selesai!";
+                resultTitle.className = "text-2xl font-bold text-gray-800 mb-2";
+                
+                resultMsg.innerText = "Jawaban telah terkirim ke server.";
+                resultMsg.className = "text-gray-500 mb-6";
+                
+                if (score < 50) {
+                    scoreEl.className = "text-5xl font-extrabold text-red-600";
+                    motivationalEl.innerHTML = `📢 "Waduh, Monitor Ketua! Sinyal otak sepertinya lagi RTO nih. Jangan panik, remidi adalah jalan ninjaku! Semangat belajar lagi ya! 🚀"`;
+                    motivationalEl.className = "mb-6 px-4 py-3 rounded-lg font-bold text-sm md:text-base border-l-4 bg-red-100 text-red-800 border-red-500";
+                } else if (score < 80) {
+                    scoreEl.className = "text-5xl font-extrabold text-yellow-600";
+                    motivationalEl.innerHTML = `🔥 "Lumayan! Dikit lagi jadi sepuh TKJ. Tingkatin lagi belajarnya biar nggak cuma jadi user, tapi jadi admin masa depan!"`;
+                    motivationalEl.className = "mb-6 px-4 py-3 rounded-lg font-bold text-sm md:text-base border-l-4 bg-yellow-100 text-yellow-800 border-yellow-500";
+                } else {
+                    scoreEl.className = "text-5xl font-extrabold text-green-600";
+                    motivationalEl.innerHTML = `👑 "Menyala Abangku! 🔥 Nilai di atas rata-rata. Pertahankan prestasimu, masa depan cerah menanti! Server aman, hati tenang."`;
+                    motivationalEl.className = "mb-6 px-4 py-3 rounded-lg font-bold text-sm md:text-base border-l-4 bg-green-100 text-green-800 border-green-500";
+                }
+
+                const reviewListEl = document.getElementById('review-list');
+                reviewListEl.innerHTML = '';
+                
+                currentQuestionList.forEach((q, idx) => {
+                    if (!q || !q.options) return;
+
+                    const userAnsIdx = userAnswers[q.id];
+                    const isCorrect = userAnsIdx === q.correct;
+                    const isSkipped = userAnsIdx === undefined;
+                    
+                    let statusClass = isCorrect ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200";
+                    let icon = isCorrect ? `<i data-lucide="check" class="text-green-600 w-5 h-5"></i>` : `<i data-lucide="x" class="text-red-600 w-5 h-5"></i>`;
+                    
+                    let userAnsText = isSkipped ? "<span class='text-gray-500 italic'>Tidak dijawab</span>" : q.options[userAnsIdx];
+                    if (userAnsIdx !== undefined && !userAnsText) userAnsText = "Opsi Tidak Valid";
+
+                    let correctAnsText = q.options[q.correct] || "Kunci Jawaban Tidak Valid";
+
+                    const reviewItem = `
+                        <div class="p-4 rounded-lg border ${statusClass}">
+                            <div class="flex items-start gap-3">
+                                <div class="mt-1 min-w-[20px]">${icon}</div>
+                                <div class="w-full">
+                                    <p class="font-semibold text-gray-800 mb-2 text-sm md:text-base">
+                                        <span class="text-gray-500 mr-1">${idx + 1}.</span> ${q.text}
+                                    </p>
+                                    
+                                    <div class="mt-3 text-sm space-y-1">
+                                        <div class="flex flex-col sm:flex-row gap-1 sm:gap-2">
+                                            <span class="font-bold text-gray-600 w-24">Jawabanmu:</span>
+                                            <span class="${isCorrect ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}">${userAnsText}</span>
+                                        </div>
+                                        ${!isCorrect ? `
+                                        <div class="flex flex-col sm:flex-row gap-1 sm:gap-2">
+                                            <span class="font-bold text-gray-600 w-24">Kunci:</span>
+                                            <span class="text-green-700 font-bold">${correctAnsText}</span>
+                                        </div>` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    reviewListEl.innerHTML += reviewItem;
+                });
+                
+                btnReview.style.display = 'flex'; 
+            }
+            
+            if(typeof lucide !== 'undefined') lucide.createIcons();
+
+            document.getElementById('section-exam').classList.add('hidden-section');
+            document.getElementById('section-result').classList.remove('hidden-section');
+        }
+
+        window.updateDashboardTable = function(data) {
+            dashboardData = data;
+            filterDashboardInternal();
+        };
+
+        function filterDashboardInternal() {
+            const filterPkt = document.getElementById('filter-session').value;
+            const filterCls = document.getElementById('filter-class').value;
+            const filterDate = document.getElementById('filter-date').value;
+            
+            const tbody = document.getElementById('dashboard-table-body');
+            tbody.innerHTML = '';
+
+            window.currentFilteredData = dashboardData.filter(item => {
+                const matchPkt = filterPkt === 'all' || item.packetType === filterPkt;
+                const matchCls = filterCls === 'all' || item.className === filterCls;
+                let matchDate = true;
+                if (filterDate) {
+                    const itemDate = new Date(item.timestamp);
+                    const y = itemDate.getFullYear();
+                    const m = String(itemDate.getMonth() + 1).padStart(2, '0');
+                    const d = String(itemDate.getDate()).padStart(2, '0');
+                    const itemDateStr = `${y}-${m}-${d}`;
+                    matchDate = itemDateStr === filterDate;
+                }
+
+                return matchPkt && matchCls && matchDate;
+            });
+
+            if (window.currentFilteredData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="px-6 py-12 text-center text-gray-400">Tidak ada data yang cocok dengan filter ini.</td></tr>';
+                return;
+            }
+
+            window.currentFilteredData.forEach(item => {
+                const date = new Date(item.timestamp).toLocaleTimeString('id-ID');
+                
+                const isCheating = item.status.includes('DISKUALIFIKASI');
+                const isDoing = item.status === 'SEDANG MENGERJAKAN';
+                
+                let statusColor = isCheating ? 'text-red-600 font-extrabold flex items-center gap-1' : 'text-green-600 font-bold';
+                let rowClass = isCheating ? 'bg-red-50 border-red-200' : 'hover:bg-slate-50 border-b';
+                let statusIcon = isCheating ? `<i data-lucide="alert-circle" class="w-4 h-4"></i>` : '';
+                
+                if (isDoing) {
+                    statusColor = 'text-blue-600 font-bold flex items-center gap-1';
+                    rowClass = 'bg-blue-50/50 border-blue-100 hover:bg-blue-50 border-b animate-pulse';
+                    statusIcon = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>`;
+                }
+                
+                const violationDisplay = item.violations > 0 
+                    ? `<button onclick="window.showViolationDetails('${item.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded text-xs font-bold flex items-center gap-1 mx-auto transition-colors shadow-sm">
+                         ${item.violations}x <i data-lucide="info" class="w-3 h-3"></i>
+                       </button>` 
+                    : '-';
+                    
+                const pktColor = item.packetType === 'A' ? 'bg-blue-100 text-blue-700' : item.packetType === 'B' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700';
+
+                const row = `
+                    <tr class="${rowClass} transition-colors">
+                        <td class="px-6 py-4">${date}</td>
+                        <td class="px-6 py-4 font-medium text-gray-900">${item.studentName}</td>
+                        <td class="px-6 py-4 text-gray-500">${item.className}</td>
+                        <td class="px-6 py-4"><span class="px-2 py-1 rounded text-xs font-bold ${pktColor}">Paket ${item.packetType}</span></td>
+                        <td class="px-6 py-4 text-center text-lg font-bold text-gray-800">${item.score}</td>
+                        <td class="px-6 py-4 ${statusColor}">${statusIcon} ${item.status}</td>
+                        <td class="px-6 py-4 text-center">${violationDisplay}</td>
+                        <td class="px-6 py-4 text-center">
+                            <button onclick="window.deleteExamResult('${item.id}')" class="text-red-500 hover:bg-red-100 p-2 rounded transition-colors" title="Hapus Data">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+                tbody.innerHTML += row;
+            });
+            
+            if(typeof lucide !== 'undefined') lucide.createIcons();
+        }
+
+        function exportToCSVInternal() {
+            const dataToExport = window.currentFilteredData && window.currentFilteredData.length > 0 ? window.currentFilteredData : dashboardData;
+            
+            if (dataToExport.length === 0) return alert("Belum ada data untuk diexport");
+            
+            let filename = "Rekap_Nilai";
+            const filterPkt = document.getElementById('filter-session').value;
+            const filterCls = document.getElementById('filter-class').value;
+            const filterDate = document.getElementById('filter-date').value;
+
+            if(filterCls !== 'all') filename += `_${filterCls.replace(/\s+/g, '-')}`;
+            if(filterPkt !== 'all') filename += `_Paket-${filterPkt}`;
+            if(filterDate) filename += `_${filterDate}`;
+            filename += ".csv";
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "Tanggal,Jam,Nama Siswa,Kelas,Paket,Nilai,Status,Pelanggaran\n";
+
+            dataToExport.forEach(row => {
+                const dateObj = new Date(row.timestamp);
+                const dateStr = dateObj.toLocaleDateString('id-ID');
+                const timeStr = dateObj.toLocaleTimeString('id-ID');
+                
+                csvContent += `"${dateStr}","${timeStr}","${row.studentName}","${row.className}","${row.packetType}","${row.score}","${row.status}","${row.violations}"\n`;
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", filename);
+            document.body.appendChild(link);
+            link.click();
+        }
+
+        if(typeof lucide !== 'undefined') {
+            lucide.createIcons();
+        }
+    </script>
+</body>
+</html>
