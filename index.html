@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>STS PRAKARYA DAN KEWIRAUSAHAAN TKJ</title>
+    <title>SI UJIAN</title>
     
     <script>
         window.onerror = function(message, source, lineno, colno, error) {
@@ -39,26 +39,43 @@
         window.auth = null;
         window.appId = 'ukktkj'; 
         window.isFirebaseReady = false;
+        
+        // --- GLOBAL SETTINGS ---
         window.currentExamToken = "TKJ2025"; 
         window.currentExamDuration = 60; 
         window.currentMinExamDuration = 0; 
+        window.deviceCooldownHours = 12; // Default 12 Jam
+        
         window.allQuestionsDB = []; 
         window.currentExamDocId = null; 
         window.examStartTime = null; 
 
-        // --- DEVICE FINGERPRINTING ---
+        // --- DEVICE FINGERPRINTING (REVISED V2) ---
+        // UPDATE: Menggunakan key 'v2' untuk mereset ID lama yang mungkin duplikat pada HP sejenis (Oppo/Vivo/Xiaomi)
         function getDeviceFingerprint() {
-            const nav = window.navigator;
-            const screen = window.screen;
-            const raw = `${nav.userAgent}||${screen.width}x${screen.height}||${screen.colorDepth}||${nav.hardwareConcurrency || 'u'}||${new Date().getTimezoneOffset()}`;
+            // Kita ganti nama key storage agar semua device membuat ID baru yang benar-benar unik
+            const STORAGE_KEY = 'ukktkj_device_v2'; 
+            let deviceId = localStorage.getItem(STORAGE_KEY);
             
-            let hash = 0;
-            for (let i = 0; i < raw.length; i++) {
-                const char = raw.charCodeAt(i);
-                hash = ((hash << 5) - hash) + char;
-                hash = hash & hash; 
+            if (!deviceId) {
+                // Generate ID yang dijamin unik menggunakan Timestamp + Math.random
+                // Meskipun tipe HP sama persis, Math.random() akan membedakannya
+                const timestamp = Date.now().toString(36);
+                const randomPart = Math.random().toString(36).substring(2, 10);
+                const randomPart2 = Math.random().toString(36).substring(2, 10);
+                
+                // Format: V2-TIMESTAMP-RANDOM-RANDOM
+                deviceId = `V2-${timestamp}-${randomPart}-${randomPart2}`;
+                
+                // Simpan permanen di HP ini
+                try {
+                    localStorage.setItem(STORAGE_KEY, deviceId);
+                } catch (e) {
+                    console.warn("Gagal menyimpan device ID ke local storage (Private Mode?)");
+                }
             }
-            return "DEV-" + Math.abs(hash).toString(16);
+            
+            return deviceId;
         }
 
         async function initFirebase() {
@@ -128,9 +145,14 @@
             const el = document.getElementById('connection-status');
             if(el) {
                 el.innerText = text;
+                // Updated styles for better visibility on new background
+                el.innerHTML = isOnline 
+                    ? `<span class="inline-block w-2 h-2 rounded-full bg-green-400 mr-1 animate-pulse"></span> ${text}`
+                    : `<span class="inline-block w-2 h-2 rounded-full bg-red-400 mr-1"></span> ${text}`;
+                
                 el.className = isOnline 
-                    ? "text-xs font-bold text-green-400 bg-green-900/30 px-2 py-1 rounded-full border border-green-500/50" 
-                    : "text-xs font-bold text-gray-400 bg-gray-800 px-2 py-1 rounded-full border border-gray-600";
+                    ? "text-[10px] font-bold text-white/90 bg-green-500/20 px-3 py-1 rounded-full border border-green-400/30 backdrop-blur-sm" 
+                    : "text-[10px] font-bold text-white/90 bg-red-500/20 px-3 py-1 rounded-full border border-red-400/30 backdrop-blur-sm";
             }
         }
 
@@ -149,22 +171,20 @@
                         if (data.token) window.currentExamToken = data.token;
                         if (data.examDuration) window.currentExamDuration = parseInt(data.examDuration);
                         if (data.minDuration) window.currentMinExamDuration = parseInt(data.minDuration); 
+                        if (data.deviceCooldown) window.deviceCooldownHours = parseInt(data.deviceCooldown);
                     }
                 });
                 
                 const teacherInput = document.getElementById('teacher-token-input');
                 const durationInput = document.getElementById('teacher-duration-input');
                 const minDurationInput = document.getElementById('teacher-min-duration-input'); 
+                const cooldownInput = document.getElementById('teacher-cooldown-input');
                 
-                if(teacherInput && document.activeElement !== teacherInput) {
-                    teacherInput.value = window.currentExamToken;
-                }
-                if(durationInput && document.activeElement !== durationInput) {
-                    durationInput.value = window.currentExamDuration;
-                }
-                if(minDurationInput && document.activeElement !== minDurationInput) {
-                    minDurationInput.value = window.currentMinExamDuration;
-                }
+                if(teacherInput && document.activeElement !== teacherInput) teacherInput.value = window.currentExamToken;
+                if(durationInput && document.activeElement !== durationInput) durationInput.value = window.currentExamDuration;
+                if(minDurationInput && document.activeElement !== minDurationInput) minDurationInput.value = window.currentMinExamDuration;
+                if(cooldownInput && document.activeElement !== cooldownInput) cooldownInput.value = window.deviceCooldownHours;
+
             }, (error) => {
                 console.log("Offline mode triggered by snapshot error");
                 window.isFirebaseReady = false;
@@ -219,11 +239,12 @@
             }
         }
 
-        // --- SAVE SETTINGS (Updated with Min Duration) ---
+        // --- SAVE SETTINGS (Updated with Cooldown) ---
         window.saveSettings = async () => {
             const newToken = document.getElementById('teacher-token-input').value.trim().toUpperCase();
             const newDuration = parseInt(document.getElementById('teacher-duration-input').value);
             const newMinDuration = parseInt(document.getElementById('teacher-min-duration-input').value) || 0; 
+            const newCooldown = parseInt(document.getElementById('teacher-cooldown-input').value) || 0;
 
             if(!newToken) return alert("Token tidak boleh kosong!");
             if(!newDuration || newDuration < 1) return alert("Durasi tidak valid (minimal 1 menit)!");
@@ -234,9 +255,10 @@
                     token: newToken,
                     examDuration: newDuration,
                     minDuration: newMinDuration, 
+                    deviceCooldown: newCooldown,
                     timestamp: Date.now()
                 });
-                alert(`Pengaturan Disimpan!\nToken: ${newToken}\nDurasi: ${newDuration} Menit\nMin Submit: ${newMinDuration} Menit`);
+                alert(`Pengaturan Disimpan!\nToken: ${newToken}\nDurasi: ${newDuration} Menit\nMin Submit: ${newMinDuration} Menit\nCooldown: ${newCooldown} Jam`);
             } else {
                 alert("Mode Offline: Pengaturan tidak tersimpan ke server.");
             }
@@ -418,7 +440,7 @@
     </script>
 
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; user-select: none; }
         .hidden-section { display: none !important; }
         ::-webkit-scrollbar { width: 8px; }
@@ -438,65 +460,167 @@
 </head>
 <body>
 
-    <!-- SECTION: LOGIN -->
-    <div id="section-login" class="min-h-screen flex items-center justify-center p-4 bg-slate-900">
-        <div class="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
-            <div class="bg-blue-600 p-6 text-center relative">
-                <div class="absolute top-4 right-4">
-                    <span id="connection-status" class="text-xs font-bold text-yellow-200 bg-yellow-900/30 px-2 py-1 rounded-full border border-yellow-500/50">Menghubungkan...</span>
+    <!-- SECTION: LOGIN (REDESIGNED) -->
+    <div id="section-login" class="min-h-screen flex items-center justify-center p-4 relative overflow-hidden bg-slate-900">
+        <!-- Background Effects -->
+        <div class="absolute inset-0 z-0">
+             <!-- Cyber Grid Background -->
+            <div class="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20"></div>
+            <div class="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-slate-900 via-[#0f172a] to-[#1e1b4b]"></div>
+            
+            <!-- Animated Globs -->
+            <div class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-blue-600/20 rounded-full blur-[100px] animate-pulse"></div>
+            <div class="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-purple-600/20 rounded-full blur-[100px] animate-pulse" style="animation-delay: 2s;"></div>
+            <div class="absolute top-[30%] right-[20%] w-64 h-64 bg-cyan-500/10 rounded-full blur-[80px]"></div>
+        </div>
+
+        <!-- Glass Card Container -->
+        <div class="w-full max-w-md bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl overflow-hidden border border-white/20 z-10 transform transition-all duration-500 hover:shadow-blue-500/20">
+            
+            <!-- Header Section -->
+            <div class="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 p-8 text-center relative overflow-hidden group">
+                <!-- Decorative pattern -->
+                <div class="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
+                
+                <div class="absolute top-4 right-4 z-20">
+                    <span id="connection-status" class="text-[10px] font-bold text-white/90 bg-white/20 px-3 py-1 rounded-full border border-white/30 backdrop-blur-sm shadow-sm flex items-center gap-2">
+                        <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span> Connecting...
+                    </span>
                 </div>
-                <h1 class="text-2xl font-bold text-white flex flex-col items-center justify-center gap-2 mt-2">
-                    <img src="images/logotkj.png" onerror="this.src='https://via.placeholder.com/150?text=Logo+TKJ'" alt="Logo TKJ" class="w-20 h-20 object-contain mb-2 bg-white rounded-full p-1">
-                    STS Prakarya dan Kewirausahaan Jurusan TKJ
-                </h1>
-                <p class="text-blue-100 text-sm mt-1">Sumatif Tengah Semester</p>
-            </div>
-            <div class="flex border-b">
-                <button id="tab-student" onclick="window.switchLoginTab('student')" class="flex-1 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 transition-colors">Login Siswa</button>
-                <button id="tab-teacher" onclick="window.switchLoginTab('teacher')" class="flex-1 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors">Login Guru</button>
-            </div>
-            <div class="p-8">
-                <form id="form-student" onsubmit="window.handleStudentLogin(event)" class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Nama Lengkap</label>
-                        <input type="text" id="student-name" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Contoh: Ahmad Dhani">
+
+                <div class="relative z-10 flex flex-col items-center">
+                    <div class="w-24 h-24 bg-white p-1.5 rounded-full shadow-lg mb-4 transform transition-all duration-500 hover:rotate-[360deg] hover:scale-105 ring-4 ring-white/30 relative">
+                        <div class="absolute inset-0 rounded-full bg-gradient-to-tr from-blue-400 to-purple-400 opacity-0 group-hover:opacity-20 transition-opacity"></div>
+                        <img src="images/logotkj.png" onerror="this.src='https://via.placeholder.com/150?text=TKJ'" alt="Logo TKJ" class="w-full h-full object-contain rounded-full bg-white">
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Kelas</label>
-                        <select id="student-class" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
-                            <option value="">Pilih Kelas</option>
-                            <option value="XI TKJ 1">XI TKJ 1</option>
-                            <option value="XI TKJ 2">XI TKJ 2</option>
-                            <option value="XII TKJ 1">XII TKJ 1</option>
-							<option value="XII TKJ 2">XII TKJ 2</option>
-                        </select>
+                    <h1 class="text-3xl font-black text-white tracking-tight drop-shadow-md">
+                        SI UJIAN TKJ
+                    </h1>
+                    <div class="h-1 w-20 bg-blue-400/50 rounded-full my-2"></div>
+                    <p class="text-blue-100 text-sm font-medium tracking-wide">Computer Network Engineering Exam</p>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex border-b border-gray-100 bg-gray-50/50">
+                <button id="tab-student" onclick="window.switchLoginTab('student')" class="flex-1 py-4 text-sm font-bold text-blue-600 border-b-2 border-blue-600 bg-white transition-all hover:bg-blue-50/50 relative">
+                    <div class="flex items-center justify-center gap-2">
+                        <i data-lucide="user" class="w-4 h-4"></i> Login Siswa
                     </div>
+                </button>
+                <button id="tab-teacher" onclick="window.switchLoginTab('teacher')" class="flex-1 py-4 text-sm font-bold text-gray-400 hover:text-gray-600 border-b-2 border-transparent transition-all hover:bg-gray-50/50">
+                    <div class="flex items-center justify-center gap-2">
+                         <i data-lucide="shield" class="w-4 h-4"></i> Login Guru
+                    </div>
+                </button>
+            </div>
+
+            <!-- Content Area -->
+            <div class="p-8 bg-white">
+                <form id="form-student" onsubmit="window.handleStudentLogin(event)" class="space-y-5">
+                    <div class="group">
+                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-1">Nama Lengkap</label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i data-lucide="user-circle" class="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors"></i>
+                            </div>
+                            <input type="text" id="student-name" required class="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all bg-gray-50 focus:bg-white text-gray-800 font-medium placeholder-gray-400" placeholder="Ketik nama lengkap...">
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="group">
+                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-1">Kelas</label>
+                            <div class="relative">
+                                <select id="student-class" required class="w-full pl-3 pr-8 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all bg-gray-50 focus:bg-white text-gray-800 font-medium appearance-none">
+                                    <option value="">Pilih Kelas</option>
+                                    <option value="X TKJ 1">X TKJ 1</option>
+                                    <option value="X TKJ 2">X TKJ 2</option>
+                                    <option value="XI TKJ 1">XI TKJ 1</option>
+                                    <option value="XI TKJ 2">XI TKJ 2</option>
+                                    <option value="XII TKJ 1">XII TKJ 1</option>
+                                    <option value="XII TKJ 2">XII TKJ 2</option>
+                                </select>
+                                <div class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-gray-500">
+                                    <i data-lucide="chevron-down" class="w-4 h-4"></i>
+                                </div>
+                            </div>
+                        </div>
+
+                         <div class="group">
+                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-1">Token</label>
+                            <div class="relative">
+                                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                    <i data-lucide="key" class="h-4 w-4 text-gray-400 group-focus-within:text-blue-500 transition-colors"></i>
+                                </div>
+                                <input type="text" id="student-token" required class="w-full pl-9 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all bg-gray-50 focus:bg-white text-center font-mono font-bold tracking-[0.2em] text-blue-600 placeholder-gray-300 uppercase" placeholder="TOKEN">
+                            </div>
+                        </div>
+                    </div>
+
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Paket Soal</label>
-                        <div class="grid grid-cols-3 gap-2" id="packet-selector">
-                            <button type="button" onclick="window.selectPacket('A')" id="pkt-A" class="pkt-btn py-2 border rounded-lg font-bold bg-blue-600 text-white border-blue-600">Paket A <br>(XI TKJ 1)</button>
-                            <button type="button" onclick="window.selectPacket('B')" id="pkt-B" class="pkt-btn py-2 border rounded-lg font-bold bg-white text-gray-600 hover:bg-gray-50">Paket B <br>(XI TKJ 2)</button>
-                            <button type="button" onclick="window.selectPacket('C')" id="pkt-C" class="pkt-btn py-2 border rounded-lg font-bold bg-white text-gray-600 hover:bg-gray-50">Paket C <br>(XII TKJ)</button>
+                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 ml-1">Pilih Paket Soal</label>
+                        <div class="grid grid-cols-1 gap-2" id="packet-selector">
+                            <button type="button" onclick="window.selectPacket('A')" id="pkt-A" class="pkt-btn relative w-full p-3 rounded-xl border-2 transition-all duration-200 text-left bg-blue-50 border-blue-600 ring-2 ring-blue-200/50 shadow-sm group">
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <div class="font-bold text-blue-700 text-sm">STS PKWU - Paket A</div>
+                                        <div class="text-[10px] font-semibold text-blue-500 uppercase mt-0.5">Kelas XI TKJ 1</div>
+                                    </div>
+                                    <div class="h-6 w-6 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-sm"><i data-lucide="check" class="w-3 h-3"></i></div>
+                                </div>
+                            </button>
+                            
+                            <div class="grid grid-cols-2 gap-2">
+                                <button type="button" onclick="window.selectPacket('B')" id="pkt-B" class="pkt-btn relative w-full p-2.5 rounded-xl border transition-all duration-200 text-left bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-500 group">
+                                     <div class="font-bold text-xs group-hover:text-gray-700">STS PKWU - Paket B</div>
+                                     <div class="text-[9px] uppercase mt-0.5">Kelas XI TKJ 2</div>
+                                </button>
+                                <button type="button" onclick="window.selectPacket('C')" id="pkt-C" class="pkt-btn relative w-full p-2.5 rounded-xl border transition-all duration-200 text-left bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-500 group">
+                                    <div class="font-bold text-xs group-hover:text-gray-700">STS PRODUKTIF - C</div>
+                                    <div class="text-[9px] uppercase mt-0.5">XI 1 & 2 TKJ</div>
+                                </button>
+                            </div>
                         </div>
                         <input type="hidden" id="selected-packet" value="A">
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Token Ujian</label>
-                        <input type="text" id="student-token" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none uppercase font-mono tracking-widest text-center bg-gray-50" placeholder="MASUKKAN TOKEN">
-                        <p class="text-xs text-gray-400 mt-1 text-center">*Minta token kepada Guru/Pengawas (Default: TKJ2025)</p>
-                    </div>
-                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow-lg mt-2 transform transition hover:scale-[1.02]">MULAI UJIAN</button>
+
+                    <button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-blue-500/30 transform transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 group">
+                        <span>MULAI UJIAN SEKARANG</span>
+                        <i data-lucide="arrow-right" class="w-5 h-5 group-hover:translate-x-1 transition-transform"></i>
+                    </button>
+                    
+                    <p class="text-[10px] text-center text-gray-400 mt-2">
+                        *Pastikan koneksi internet stabil sebelum memulai.
+                    </p>
                 </form>
-                <form id="form-teacher" onsubmit="window.handleTeacherLogin(event)" class="space-y-4 hidden-section">
-                    <input type="text" id="teacher-user" placeholder="Username" class="w-full px-4 py-2 border rounded-lg outline-none">
-                    <input type="password" id="teacher-pass" placeholder="Password" class="w-full px-4 py-2 border rounded-lg outline-none">
-                    <button type="submit" class="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-3 rounded-lg shadow-lg">Masuk Dashboard</button>
+
+                <form id="form-teacher" onsubmit="window.handleTeacherLogin(event)" class="space-y-5 hidden-section">
+                    <div class="p-4 bg-yellow-50 rounded-xl border border-yellow-200 flex items-start gap-3 mb-2">
+                        <i data-lucide="lock" class="w-5 h-5 text-yellow-600 mt-0.5"></i>
+                        <div>
+                            <h4 class="text-sm font-bold text-yellow-800">Akses Terbatas</h4>
+                            <p class="text-xs text-yellow-700 mt-1">Halaman ini hanya untuk Guru & Administrator sistem.</p>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-1">Username</label>
+                        <input type="text" id="teacher-user" placeholder="Username Admin" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-gray-500/10 focus:border-gray-500 outline-none transition-all bg-gray-50 focus:bg-white text-gray-800 font-medium">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-1">Password</label>
+                        <input type="password" id="teacher-pass" placeholder="••••••••" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-gray-500/10 focus:border-gray-500 outline-none transition-all bg-gray-50 focus:bg-white text-gray-800 font-medium">
+                    </div>
+                    <button type="submit" class="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-3.5 rounded-xl shadow-lg transform transition-all hover:scale-[1.02] flex items-center justify-center gap-2">
+                        <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Masuk Dashboard
+                    </button>
                 </form>
             </div>
-				 <!-- COPYRIGHT FOOTER -->
-            <div class="bg-gray-50 p-3 text-center border-t">
-                <p class="text-[10px] text-gray-400 font-medium">
-                    &copy; 2026 Nailul Authar - TKJ SMK Negeri 1 Brondong
+            
+            <!-- Footer -->
+            <div class="bg-gray-50/80 p-4 text-center border-t border-gray-100 backdrop-blur-sm">
+                <p class="text-[10px] text-gray-400 font-medium flex items-center justify-center gap-1">
+                    &copy; 2026 Nailul Authar <span class="text-gray-300">•</span> SMK Negeri 1 Brondong
                 </p>
             </div>
         </div>
@@ -698,7 +822,7 @@
                 <!-- MODIFIED: PENGATURAN TOKEN DAN DURASI -->
                 <div class="bg-white rounded-xl shadow-sm border p-6 mb-6">
                     <h2 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i data-lucide="settings" class="w-5 h-5 text-gray-600"></i> Pengaturan Ujian</h2>
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
                         <!-- Input Token -->
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">Token Akses</label>
@@ -723,7 +847,7 @@
                             <p class="text-xs text-gray-500 mt-1">Waktu hitung mundur otomatis.</p>
                         </div>
                         
-                        <!-- NEW: Input Min Duration -->
+                        <!-- Input Min Duration -->
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">Min. Submit (Menit)</label>
                             <div class="flex gap-2">
@@ -733,6 +857,18 @@
                                 <input type="number" id="teacher-min-duration-input" min="0" class="w-full px-4 py-2 border rounded-lg font-bold text-center text-red-600 bg-gray-50 focus:ring-2 focus:ring-red-500 outline-none" placeholder="0" value="0">
                             </div>
                             <p class="text-xs text-gray-500 mt-1">Siswa tidak bisa submit sebelum waktu ini.</p>
+                        </div>
+
+                        <!-- NEW: Input Cooldown Device -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Cooldown Device (Jam)</label>
+                            <div class="flex gap-2">
+                                <div class="bg-purple-50 p-2 rounded border border-purple-200 flex items-center justify-center">
+                                    <i data-lucide="shield-alert" class="w-5 h-5 text-purple-600"></i>
+                                </div>
+                                <input type="number" id="teacher-cooldown-input" min="0" class="w-full px-4 py-2 border rounded-lg font-bold text-center text-purple-600 bg-gray-50 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="12" value="12">
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Lama waktu perangkat terkunci.</p>
                         </div>
                     </div>
                     <div class="mt-4 flex justify-end">
@@ -757,15 +893,17 @@
                                 <label class="block text-xs font-semibold text-gray-500 mb-1">Paket Soal</label>
                                 <select id="filter-session" onchange="window.filterDashboard()" class="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
                                     <option value="all">Semua Paket</option>
-                                    <option value="A">Paket A <br> (Kelas XI TKJ 1)</option>
-                                    <option value="B">Paket B <br>(Kelas XI TKJ 2)</option>
-                                    <option value="C">Paket C <br> (Kelas XII)</option>
+                                    <option value="A">Paket A PKWU <br> (Kelas XI TKJ 1)</option>
+                                    <option value="B">Paket B PKWU<br>(Kelas XI TKJ 2)</option>
+                                    <option value="C">Paket C PRODUKTIF<br> (Kelas XI TKJ 1 & 2)</option>
                                 </select>
                             </div>
                             <div>
                                 <label class="block text-xs font-semibold text-gray-500 mb-1">Kelas</label>
                                 <select id="filter-class" onchange="window.filterDashboard()" class="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
                                     <option value="all">Semua Kelas</option>
+									 <option value="X TKJ 1">X TKJ 1</option>
+									  <option value="X TKJ 2">X TKJ 2</option>
                                     <option value="XI TKJ 1">XI TKJ 1</option>
 									<option value="XI TKJ 2">XI TKJ 2</option>
 									<option value="XII TKJ 1">XII TKJ 1</option>
@@ -819,9 +957,9 @@
                         <label class="block text-xs font-semibold text-gray-500 mb-1">Filter Paket Soal</label>
                         <select id="filter-bank-packet" onchange="window.filterQuestionBank()" class="w-full md:w-64 px-3 py-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
                             <option value="all">Semua Paket</option>
-                                <option value="A">Paket A (Kelas XI TKJ 1)</option>
-                                    <option value="B">Paket B (Kelas XI TKJ 2)</option>
-                                    <option value="C">Paket C (Kelas XII)</option>
+                                <option value="A">Paket A (PKWU Kelas XI TKJ 1)</option>
+                                    <option value="B">Paket B PKWU (Kelas XI TKJ 2)</option>
+                                    <option value="C">Paket C PRODUKTIF(Kelas XI TKJ 1 & 2)</option>
                         </select>
                     </div>
 
@@ -931,26 +1069,29 @@
                 { id: 20, text: "Riko melatih kreativitasnya dengan mengembangkan ide bisnis teknologi secara bertahap: Tahap 1: Brainstorming 8 ide bisnis, Tahap 2: Seleksi menjadi 5 ide potensial, Tahap 3: Riset mendalam untuk 3 ide terbaik, Tahap 4: Prototype untuk 2 ide teratas, Tahap 5: Launching 1 ide terbaik. Dari proses kreatif Riko, berapa total ide yang ia kumpulkan di awal, dan berapa ide yang akhirnya dijalankan?", options: ["Kumpulkan 5 ide, jalankan 1 ide", "Kumpulkan 6 ide, jalankan 2 ide", "Kumpulkan 8 ide, jalankan 1 ide", "Kumpulkan 8 ide, jalankan 2 ide", "Kumpulkan 10 ide, jalankan 1 ide"], correct: 2 }
             ],
             C: [
-                { id: 1, text: "Sebuah SMK baru mengadakan praktikum wireless networking. Standar Wi-Fi yang mampu beroperasi di kedua frekuensi 2.4 GHz dan 5 GHz secara bersamaan dan menawarkan efisiensi terbaik adalah...", options: ["802.11a", "802.11b", "802.11g", "802.11ac", "802.11ax"], correct: 4 },
-                { id: 2, text: "Seorang teknisi memasang kabel Fiber Optic. Alat untuk memotong kabel fiber agar rata sebelum disambung adalah...", options: ["Crimping Tool", "Tang Potong", "Cleaver", "Stripper", "Fusion Splicer"], correct: 2 },
-                { id: 3, text: "IP Address 192.168.10.1 dengan subnet mask 255.255.255.0 termasuk dalam kelas...", options: ["Kelas A", "Kelas B", "Kelas C", "Kelas D", "Kelas E"], correct: 2 },
-                { id: 4, text: "Protokol yang digunakan secara default untuk mengirim email antar server adalah...", options: ["POP3", "IMAP", "SMTP", "HTTP", "FTP"], correct: 2 },
-                { id: 5, text: "Perangkat jaringan yang berfungsi memperkuat sinyal nirkabel dari Access Point utama ke area yang lebih jauh disebut...", options: ["Switch", "Hub", "Repeater / Range Extender", "Modem", "NIC"], correct: 2 },
-                { id: 6, text: "Perintah CLI dasar yang digunakan untuk menguji konektivitas antara dua perangkat jaringan adalah...", options: ["ipconfig", "ifconfig", "ping", "tracert", "netstat"], correct: 2 },
-                { id: 7, text: "Keuntungan utama menggunakan kabel Fiber Optic dibandingkan kabel tembaga (Coaxial/UTP) untuk jarak jauh adalah...", options: ["Harga lebih murah", "Instalasi lebih mudah", "Tahan terhadap interferensi elektromagnetik (EMI)", "Tidak memerlukan alat khusus", "Lebih fleksibel"], correct: 2 },
-                { id: 8, text: "Layanan server yang berfungsi menerjemahkan nama domain (seperti google.com) menjadi alamat IP adalah...", options: ["DHCP", "Web Server", "DNS", "FTP", "Proxy"], correct: 2 },
-                { id: 9, text: "Urutan warna kabel UTP standar T568B dari kiri ke kanan (pin 1-8) adalah...", options: ["Putih Hijau, Hijau...", "Putih Orange, Orange, Putih Hijau, Biru, Putih Biru, Hijau, Putih Coklat, Coklat", "Putih Coklat, Coklat...", "Putih Biru, Biru...", "Orange, Putih Orange..."], correct: 1 },
-                { id: 10, text: "Topologi jaringan di mana setiap node terhubung langsung ke satu perangkat pusat (hub/switch) disebut...", options: ["Bus", "Ring", "Mesh", "Star", "Tree"], correct: 3 },
-                { id: 11, text: "Kabel UTP kategori 5 (Cat5) memiliki panjang maksimum standar 100 meter untuk transmisi data yang optimal.", options: ["TRUE", "FALSE"], correct: 0 },
-                { id: 12, text: "Alamat IP 192.168.1.1 adalah contoh dari alamat IP Kelas A.", options: ["TRUE", "FALSE"], correct: 1 },
-                { id: 13, text: "Fiber optik mentransmisikan data menggunakan sinyal cahaya, bukan sinyal listrik.", options: ["TRUE", "FALSE"], correct: 0 },
-                { id: 14, text: "Switch bekerja pada Layer 1 (Physical) dalam model OSI.", options: ["TRUE", "FALSE"], correct: 1 },
-                { id: 15, text: "Fungsi utama DNS adalah mengubah alamat IP menjadi MAC Address.", options: ["TRUE", "FALSE"], correct: 1 },
-                { id: 16, text: "Bluetooth dan Wi-Fi yang beroperasi pada frekuensi 2.4 GHz berpotensi saling mengganggu (interferensi).", options: ["TRUE", "FALSE"], correct: 0 },
-                { id: 17, text: "Kabel crossover dan kabel straight memiliki susunan pin yang sama di kedua ujungnya.", options: ["TRUE", "FALSE"], correct: 1 },
-                { id: 18, text: "WEP adalah standar keamanan wireless yang paling aman dan masih direkomendasikan saat ini.", options: ["TRUE", "FALSE"], correct: 1 },
-                { id: 19, text: "Switch Layer 3 mampu menjalankan fungsi routing yang biasanya dilakukan oleh router.", options: ["TRUE", "FALSE"], correct: 0 },
-                { id: 20, text: "Frekuensi 5 GHz menawarkan kecepatan transfer data yang lebih tinggi dibandingkan 2.4 GHz.", options: ["TRUE", "FALSE"], correct: 0 }
+                // SOAL HOTS KEAMANAN JARINGAN (LITERASI 1-10)
+                { id: 1, text: "Sebuah server sekolah mengalami kelambatan luar biasa. Tim IT menemukan log yang menunjukkan jutaan request dari ribuan alamat IP berbeda dalam waktu bersamaan, menyebabkan CPU server mencapai 100%. Serangan ini dikategorikan sebagai...", options: ["Phishing", "Man in the Middle", "DDoS (Distributed Denial of Service)", "SQL Injection", "Ransomware"], correct: 2 },
+                { id: 2, text: "Admin jaringan sedang mengkonfigurasi Firewall untuk Web Server. Ia ingin memastikan server bisa diakses publik untuk website, tetapi tidak ingin orang asing bisa mengakses remote SSH. Konfigurasi aturan firewall mana yang paling efektif dan aman?", options: ["Allow All Traffic", "Block All Traffic", "Allow Port 80 & 443 Only, Block Others", "Allow Port 21 (FTP) & 22 (SSH) Only", "Allow ICMP Ping Only"], correct: 2 },
+                { id: 3, text: "Dalam Vulnerability Assessment, ditemukan bahwa server menggunakan versi Apache yang sudah usang (outdated) dan memiliki celah keamanan CVE-2023-XXXX. Risiko terbesar jika hal ini dibiarkan adalah...", options: ["Internet menjadi lambat", "Kerusakan hardware server", "Penyerang bisa mengeksploitasi celah (Exploit) untuk mengambil alih sistem", "Server akan mati otomatis karena lisensi habis", "Tidak ada risiko karena server masih berjalan normal"], correct: 2 },
+                { id: 4, text: "Seorang teknisi diminta mengamankan jaringan Wi-Fi sekolah. Pilihan enkripsi mana yang paling direkomendasikan saat ini untuk memberikan keamanan maksimal terhadap serangan brute force?", options: ["WEP (Wired Equivalent Privacy)", "WPA3-AES (Wi-Fi Protected Access 3)", "WPA (Wi-Fi Protected Access)", "TKIP (Temporal Key Integrity Protocol)", "Open System (Tanpa Password)"], correct: 1 },
+                { id: 5, text: "Guru menerima email yang terlihat resmi dari 'Kepala Sekolah' meminta transfer pulsa segera dengan bahasa yang sedikit kaku dan mendesak. Setelah dicek, alamat email pengirim ternyata 'kepalasekolah123@gmail.com', bukan email resmi sekolah. Teknik serangan ini disebut...", options: ["Spamming", "Phishing / Social Engineering", "Virus", "Worm", "Adware"], correct: 1 },
+                { id: 6, text: "Banyak siswa menggunakan password '123456' atau 'password' untuk akun e-learning mereka. Kebijakan keamanan (Password Policy) terbaik untuk mengatasi masalah ini adalah...", options: ["Membiarkan saja agar siswa tidak lupa", "Mewajibkan kombinasi huruf, angka, simbol, dan menerapkan MFA (Multi-Factor Authentication)", "Mewajibkan ganti password setiap hari", "Menulis password di kertas dan ditempel di monitor", "Meminta siswa saling bertukar password agar bisa saling mengingatkan"], correct: 1 },
+                { id: 7, text: "Sebuah komputer di lab komputer tiba-tiba menampilkan layar merah dengan pesan 'File Anda telah dienkripsi. Bayar $500 dalam Bitcoin untuk mendapatkan kuncinya'. Serangan malware jenis ini disebut...", options: ["Spyware", "Adware", "Trojan", "Ransomware", "Rootkit"], correct: 3 },
+                { id: 8, text: "Untuk mengantisipasi bencana alam atau serangan siber yang merusak data server utama, strategi backup data yang paling direkomendasikan menurut standar industri adalah...", options: ["Simpan backup di folder C: komputer yang sama", "Copy file ke satu Flashdisk dan dibawa pulang", "Strategi 3-2-1 (3 salinan data, 2 media berbeda, 1 disimpan di lokasi berbeda/cloud)", "Upload ke Google Drive saja tanpa backup lokal", "Print semua dokumen penting sebagai arsip"], correct: 2 },
+                { id: 9, text: "Jaringan Wi-Fi tamu (Guest) di sekolah seringkali menyebabkan jaringan utama (Admin/Guru) menjadi lambat dan berisiko terkena virus dari perangkat tamu. Solusi jaringan terbaik untuk masalah ini adalah...", options: ["Mematikan Wi-Fi tamu selamanya", "Membeli router yang lebih mahal", "Menerapkan VLAN (Virtual Local Area Network) untuk memisahkan segmentasi jaringan", "Meminta tamu tidak menggunakan internet", "Menggunakan Hub agar semua terhubung jadi satu"], correct: 2 },
+                { id: 10, text: "Jika terjadi insiden peretasan pada server sekolah, langkah pertama yang harus dilakukan menurut prosedur Incident Response adalah...", options: ["Format ulang semua komputer segera", "Panik dan mematikan listrik gedung", "Containment (Isolasi sistem yang terdampak agar serangan tidak menyebar)", "Membayar uang tebusan kepada peretas", "Membiarkan saja sampai peretas bosan"], correct: 2 },
+                
+                // SOAL HOTS KEAMANAN JARINGAN (NUMERASI 11-20)
+                { id: 11, text: "Sebuah password hash sederhana membutuhkan waktu 54.000 detik untuk dipecahkan menggunakan teknik Brute Force dengan hardware standar. Berapa jam waktu yang dibutuhkan penyerang untuk menembus password tersebut?", options: ["10 Jam", "15 Jam", "20 Jam", "24 Jam", "12 Jam"], correct: 1 },
+                { id: 12, text: "Sistem firewall baru berhasil memblokir serangan siber secara signifikan. Dari rata-rata 1.000 percobaan serangan per hari, setelah firewall dipasang, hanya tersisa 127 serangan yang lolos atau terdeteksi sebagai anomali. Berapa persen tingkat keberhasilan pengurangan (reduction) serangan tersebut?", options: ["80%", "85%", "87.3%", "90%", "75.5%"], correct: 2 },
+                { id: 13, text: "Traffic normal sebuah jaringan kantor adalah 110 Mbps. Tiba-tiba terjadi serangan DDoS sehingga total traffic melonjak menjadi 500 Mbps. Berapa besar traffic anomali (serangan) yang membanjiri jaringan tersebut?", options: ["390 Mbps", "400 Mbps", "500 Mbps", "610 Mbps", "110 Mbps"], correct: 0 },
+                { id: 14, text: "Sebuah server log keamanan menghasilkan data log sebesar 100 MB per hari. Jika kebijakan retensi data mengharuskan log disimpan selama 30 hari, berapa kapasitas penyimpanan minimal yang dibutuhkan?", options: ["1 GB", "2 GB", "3 GB", "30 GB", "100 GB"], correct: 2 },
+                { id: 15, text: "Sebuah file rahasia berukuran 1.024 MB dicuri (exfiltration) oleh peretas melalui jaringan dengan kecepatan upload 8 Mbps (Megabit per second). Berapa detik waktu yang dibutuhkan peretas untuk mengambil file tersebut? (Ingat: 1 Byte = 8 bit)", options: ["128 detik", "512 detik", "1024 detik", "100 detik", "60 detik"], correct: 2 },
+                { id: 16, text: "Dalam audit keamanan, ditemukan 5 celah keamanan (vulnerability) dengan skor risiko: 8, 9, 4, 2, dan 7. Jika perusahaan menetapkan bahwa hanya celah dengan skor di atas 6 yang wajib ditambal segera (High Risk), berapa jumlah celah yang harus segera diperbaiki?", options: ["1 Celah", "2 Celah", "3 Celah", "4 Celah", "5 Celah"], correct: 2 },
+                { id: 17, text: "Perusahaan menginvestasikan Rp 100 Juta untuk sistem keamanan baru. Sistem ini berhasil mencegah kerugian akibat serangan siber senilai Rp 450 Juta. Berapa nilai penghematan bersih (Net Savings) yang didapatkan perusahaan?", options: ["Rp 100 Juta", "Rp 250 Juta", "Rp 350 Juta", "Rp 450 Juta", "Rp 550 Juta"], correct: 2 },
+                { id: 18, text: "Seorang admin membagi jaringan menggunakan subnet mask /27 (255.255.255.224). Berapa jumlah host (IP Address) yang valid dan bisa digunakan untuk perangkat dalam satu subnet tersebut?", options: ["254 Host", "126 Host", "30 Host", "62 Host", "14 Host"], correct: 2 },
+                { id: 19, text: "Analisis risiko menggunakan rumus: Risk = Impact x Probability. Jika dampak (Impact) kebocoran data bernilai 5 (Sangat Tinggi) dan kemungkinan (Probability) terjadinya bernilai 4 (Tinggi), berapa skor risiko keamanan tersebut?", options: ["9", "1", "20", "54", "10"], correct: 2 },
+                { id: 20, text: "Akibat serangan Ransomware, sebuah e-commerce mati total (downtime) selama 24 jam. Jika rata-rata pendapatan per jam adalah Rp 10 Juta, berapa total kerugian finansial langsung akibat serangan tersebut?", options: ["Rp 100 Juta", "Rp 120 Juta", "Rp 200 Juta", "Rp 240 Juta", "Rp 10 Juta"], correct: 3 }
             ]
         };
 
@@ -966,6 +1107,9 @@
         let currentQuestionList = [];
         let currentQuestionIndex = 0;
         let isWarningActive = false; 
+        
+        // --- NEW: STATE UNTUK MENCEGAH FALSE POSITIVE SAAT ROTASI ---
+        let isRotating = false;
 
         window.switchLoginTab = function(type) {
             const btnStudent = document.getElementById('tab-student');
@@ -974,26 +1118,65 @@
             const formTeacher = document.getElementById('form-teacher');
 
             if (type === 'student') {
-                btnStudent.className = "flex-1 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 transition-colors";
-                btnTeacher.className = "flex-1 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors";
+                btnStudent.className = "flex-1 py-4 text-sm font-bold text-blue-600 border-b-2 border-blue-600 bg-white transition-all hover:bg-blue-50/50";
+                btnTeacher.className = "flex-1 py-4 text-sm font-bold text-gray-400 hover:text-gray-600 border-b-2 border-transparent transition-all hover:bg-gray-50/50";
                 formStudent.classList.remove('hidden-section');
                 formTeacher.classList.add('hidden-section');
             } else {
-                btnStudent.className = "flex-1 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 transition-colors";
-                btnTeacher.className = "flex-1 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 transition-colors";
+                btnStudent.className = "flex-1 py-4 text-sm font-bold text-gray-400 hover:text-gray-600 border-b-2 border-transparent transition-all hover:bg-gray-50/50";
+                btnTeacher.className = "flex-1 py-4 text-sm font-bold text-blue-600 border-b-2 border-blue-600 bg-white transition-all hover:bg-blue-50/50";
                 formStudent.classList.add('hidden-section');
                 formTeacher.classList.remove('hidden-section');
             }
         };
 
         window.selectPacket = function(pkt) {
+            // Reset styles for packet selection logic manually to match new design
             document.querySelectorAll('.pkt-btn').forEach(btn => {
-                btn.className = "pkt-btn py-2 border rounded-lg font-bold bg-white text-gray-600 hover:bg-gray-50";
+                // Default unselected state
+                btn.className = "pkt-btn relative w-full p-2.5 rounded-xl border transition-all duration-200 text-left bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-500 group";
+                // Inner reset
+                const title = btn.querySelector('.font-bold');
+                if(title) title.className = "font-bold text-xs group-hover:text-gray-700";
+                
+                // Remove icon if present
+                const iconDiv = btn.querySelector('.h-6');
+                if(iconDiv) iconDiv.remove();
+                
+                // Adjust layout if it was the large A button
+                if(btn.id === 'pkt-A') {
+                     btn.className = "pkt-btn relative w-full p-3 rounded-xl border transition-all duration-200 text-left bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-500 group";
+                     btn.innerHTML = `
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <div class="font-bold text-xs group-hover:text-gray-700">STS PKWU - Paket A</div>
+                                <div class="text-[10px] uppercase mt-0.5">Kelas XI TKJ 1</div>
+                            </div>
+                        </div>`;
+                }
             });
+
+            // Set Selected State
             const selectedBtn = document.getElementById('pkt-' + pkt);
             if(selectedBtn) {
-                selectedBtn.className = "pkt-btn py-2 border rounded-lg font-bold bg-blue-600 text-white border-blue-600";
+                 if(pkt === 'A') {
+                    selectedBtn.className = "pkt-btn relative w-full p-3 rounded-xl border-2 transition-all duration-200 text-left bg-blue-50 border-blue-600 ring-2 ring-blue-200/50 shadow-sm group";
+                    selectedBtn.innerHTML = `
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <div class="font-bold text-blue-700 text-sm">STS PKWU - Paket A</div>
+                                <div class="text-[10px] font-semibold text-blue-500 uppercase mt-0.5">Kelas XI TKJ 1</div>
+                            </div>
+                            <div class="h-6 w-6 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-sm"><i data-lucide="check" class="w-3 h-3"></i></div>
+                        </div>`;
+                 } else {
+                    selectedBtn.className = "pkt-btn relative w-full p-2.5 rounded-xl border-2 transition-all duration-200 text-left bg-blue-50 border-blue-600 text-blue-700 ring-2 ring-blue-200/50 shadow-sm group";
+                    const title = selectedBtn.querySelector('.font-bold');
+                    if(title) title.className = "font-bold text-xs text-blue-700";
+                 }
+                 
                 document.getElementById('selected-packet').value = pkt;
+                if(typeof lucide !== 'undefined') lucide.createIcons();
             }
         };
 
@@ -1159,9 +1342,10 @@
                     const now = Date.now();
                     const diffHours = (now - lastTime) / (1000 * 60 * 60);
 
-                    if (diffHours < 12) {
-                        const remaining = Math.ceil(12 - diffHours);
-                        alert(`⛔ AKSES DITOLAK (PERANGKAT TERKUNCI)\n\nPerangkat ini baru saja digunakan oleh: "${sessionData.name}".\n\nSistem membatasi penggunaan perangkat yang sama (Cooldown 12 Jam).\nSilakan coba lagi dalam ${remaining} jam.`);
+                    // --- MODIFIED: Use dynamic cooldown ---
+                    if (diffHours < window.deviceCooldownHours) {
+                        const remaining = Math.ceil(window.deviceCooldownHours - diffHours);
+                        alert(`⛔ AKSES DITOLAK (PERANGKAT TERKUNCI)\n\nPerangkat ini baru saja digunakan oleh: "${sessionData.name}".\n\nSistem membatasi penggunaan perangkat yang sama.\nDurasi Cooldown: ${window.deviceCooldownHours} Jam.\nSilakan coba lagi dalam ${remaining} jam.`);
                         return; 
                     } else {
                         localStorage.removeItem('ukktkj_session_done');
@@ -1191,7 +1375,8 @@
                             const recordTime = d.timestamp;
                             const recordAgeHours = (nowServer - recordTime) / (1000 * 60 * 60);
 
-                            if (recordAgeHours < 12) {
+                            // --- MODIFIED: Server-side check with dynamic cooldown ---
+                            if (recordAgeHours < window.deviceCooldownHours) {
                                 if (d.studentName.toLowerCase() === name.toLowerCase() && d.className === cls) {
                                     if (d.status.includes('SELESAI') || d.status.includes('DISKUALIFIKASI')) {
                                         isDuplicateName = true; 
@@ -1215,14 +1400,14 @@
                 }
 
                 if (isDuplicateName) {
-                    alert(`⛔ AKSES DITOLAK\n\nSiswa atas nama "${name}" tercatat SUDAH MENYELESAIKAN ujian atau DIDISKUALIFIKASI dalam 12 jam terakhir.\n\nTidak diizinkan login ulang.`);
+                    alert(`⛔ AKSES DITOLAK\n\nSiswa atas nama "${name}" tercatat SUDAH MENYELESAIKAN ujian atau DIDISKUALIFIKASI dalam ${window.deviceCooldownHours} jam terakhir.\n\nTidak diizinkan login ulang.`);
                     submitBtn.disabled = false;
                     submitBtn.innerText = oldText;
                     return;
                 }
 
                 if (isDeviceBlocked) {
-                    alert(`⛔ PERANGKAT DIBLOKIR (SISTEM ANTI-CHEAT)\n\nSistem mendeteksi HP/Perangkat ini baru saja digunakan oleh siswa: "${blockedByWho}".\n\nMohon gunakan perangkat sendiri. Perangkat ini terkunci selama 12 jam.`);
+                    alert(`⛔ PERANGKAT DIBLOKIR (SISTEM ANTI-CHEAT)\n\nSistem mendeteksi HP/Perangkat ini baru saja digunakan oleh siswa: "${blockedByWho}".\n\nMohon gunakan perangkat sendiri. Perangkat ini terkunci selama ${window.deviceCooldownHours} jam.`);
                     submitBtn.disabled = false;
                     submitBtn.innerText = oldText;
                     return;
@@ -1559,8 +1744,14 @@
                 }
             }, 1000);
 
+            // --- LISTENERS ---
             document.addEventListener("visibilitychange", handleVisibility);
             window.addEventListener("blur", handleBlur); 
+            
+            // --- NEW: TOLERANSI ROTASI LAYAR ---
+            // Saat HP diputar (resize), matikan deteksi blur sebentar
+            window.addEventListener("resize", handleResizeToleransi);
+            
             document.addEventListener("contextmenu", e => e.preventDefault());
 
             history.pushState(null, null, location.href);
@@ -1572,13 +1763,27 @@
             };
         }
 
+        // --- NEW: FUNGSI HANDLER ROTASI ---
+        function handleResizeToleransi() {
+            isRotating = true;
+            // Beri waktu 1.5 detik toleransi setelah layar diputar
+            setTimeout(() => {
+                isRotating = false;
+            }, 1500);
+        }
+
         function handleVisibility() {
+            // Visibility change (pindah tab total/minimize) tetap dianggap curang
+            // meski sedang rotasi, karena pindah tab != rotasi
             if (document.hidden) {
                 registerViolation("Anda meninggalkan tab ujian!");
             }
         }
 
         function handleBlur() {
+            // JIKA SEDANG ROTASI (isRotating = true), JANGAN ANGGAP CURANG
+            if (isRotating) return;
+
             if (!document.hidden) {
                 registerViolation("Terdeteksi interaksi di luar layar ujian (Aplikasi Mengambang/Notifikasi)!");
             }
@@ -1621,8 +1826,11 @@
 
         function finishExam(forced = false) {
             clearInterval(examTimer);
+            
+            // Hapus semua listener saat ujian selesai
             document.removeEventListener("visibilitychange", handleVisibility);
             window.removeEventListener("blur", handleBlur);
+            window.removeEventListener("resize", handleResizeToleransi); // Hapus listener rotasi
             window.onpopstate = null;
             window.onbeforeunload = null;
 
